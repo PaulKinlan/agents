@@ -23,8 +23,14 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # the tests dir, for tests/cheap_tool_pins.py
 
 from lib.pins_audit import DEFAULT_LOOKUP, audit, main, render  # noqa: E402
+# agents-z3cp5: the audit re-derives by running the REAL generator, which hashes every trusted tool
+# the host has - 73.09 s a run on this VM (measured 2026-10-27), so ~19 re-derivations made this
+# module a ~23-minute gate. The arms assert what the audit CONCLUDES, never how big a binary is, so
+# the tools an arm does not name are stand-ins: 6.49 s a run. See tests/cheap_tool_pins.py.
+from cheap_tool_pins import stage_cheap_tools  # noqa: E402
 
 CLI = ROOT / "tools" / "audit-tool-pins.sh"
 # The coverage oracle reads the LITERAL in run_cli()'s subprocess call, so it must name the tool
@@ -85,6 +91,10 @@ class AuditTests(unittest.TestCase):
         for name in PIN_NAMES:
             self.addCleanup(os.environ.pop, name, None)
 
+    def cheap(self):
+        """A lookup dir of stand-ins for the tools this arm does not name (agents-z3cp5)."""
+        return stage_cheap_tools(self.dir / "cheap-tools")
+
     # --- the detector fires ---------------------------------------------------------------
 
     def test_a_forged_path_is_reported_and_the_audit_exits_non_zero(self):
@@ -92,7 +102,7 @@ class AuditTests(unittest.TestCase):
         forged = self.dir / "attacker" / "git"
         digest = write_fake_binary(forged, "FORGED-EXECUTED")
         pins = write_pins(self.dir / "pins.yaml", {"git": {"path": str(forged), "sha256": digest}})
-        result = run_cli(["--pins", str(pins)])
+        result = run_cli(["--pins", str(pins), "--lookup-path", str(self.cheap())])
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(str(forged), result.stdout)
         self.assertIn("DIFFERS", result.stdout)
@@ -105,7 +115,7 @@ class AuditTests(unittest.TestCase):
             self.skipTest("no /usr/bin/git on this machine")
         pins = write_pins(self.dir / "pins.yaml",
                           {"git": {"path": real_git, "sha256": "0" * 64}})
-        report = audit(pins_arg=str(pins), lookup=str(self.dir))
+        report = audit(pins_arg=str(pins), lookup=f"{self.dir}:{self.cheap()}")
         self.assertTrue(report.disagrees)
         self.assertTrue(any("hashes to" in m for m in report.hash_mismatches),
                         report.hash_mismatches)
@@ -114,7 +124,7 @@ class AuditTests(unittest.TestCase):
         forged = self.dir / "attacker" / "sneaky"
         digest = write_fake_binary(forged, "SNEAKY")
         pins = write_pins(self.dir / "pins.yaml", {"sneaky": {"path": str(forged), "sha256": digest}})
-        report = audit(pins_arg=str(pins), lookup=str(self.dir / "empty-lookup"))
+        report = audit(pins_arg=str(pins), lookup=f"{self.dir / 'empty-lookup'}:{self.cheap()}")
         kinds = {(d.name, d.in_use is not None, d.rederived is not None) for d in report.differences}
         self.assertIn(("sneaky", True, False), kinds)
         self.assertTrue(report.disagrees)
@@ -154,8 +164,9 @@ class AuditTests(unittest.TestCase):
     def test_a_file_that_agrees_with_a_fresh_derivation_exits_zero(self):
         lookup = self.dir / "lookup"
         write_fake_binary(lookup / "git", "REAL")
-        pins = generate(self.dir / "pins.yaml", str(lookup))
-        result = run_cli(["--pins", str(pins), "--lookup-path", str(lookup)])
+        cheap_lookup = f"{lookup}:{self.cheap()}"
+        pins = generate(self.dir / "pins.yaml", cheap_lookup)
+        result = run_cli(["--pins", str(pins), "--lookup-path", cheap_lookup])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("AGREES", result.stdout)
 
@@ -181,7 +192,7 @@ class AuditTests(unittest.TestCase):
 
     def test_the_report_states_what_it_inspected_rederived_and_could_not_check(self):
         """A detector must not imply it verified more than it did."""
-        result = run_cli(["--pins", str(self.dir / "pins.yaml")])
+        result = run_cli(["--pins", str(self.dir / "pins.yaml"), "--lookup-path", str(self.cheap())])
         for section in ("INSPECTED", "RE-DERIVED", "NOT CHECKED"):
             self.assertIn(section, result.stdout)
         self.assertIn("lookup-path", result.stdout)
@@ -192,18 +203,20 @@ class AuditTests(unittest.TestCase):
         pins = write_pins(self.dir / "pins.yaml",
                           {"git": {"path": str(write_fake_binary(self.dir / "git")),
                                     "sha256": hashlib.sha256((self.dir / "git").read_bytes()).hexdigest()}})
-        legacy = run_cli([], env_extra={"FACTORY_TOOL_PINS": str(pins)})
+        legacy = run_cli(["--lookup-path", str(self.cheap())],
+                         env_extra={"FACTORY_TOOL_PINS": str(pins)})
         self.assertIn("FACTORY_TOOL_PINS", legacy.stdout)
         self.assertIn("legacy", legacy.stdout)
         self.assertNotIn("CANNOT AUDIT", legacy.stdout)
-        explicit = run_cli(["--pins", str(pins)])
+        explicit = run_cli(["--pins", str(pins), "--lookup-path", str(self.cheap())])
         self.assertIn("explicit --pins", explicit.stdout)
 
     def test_a_child_only_name_is_not_silently_audited_as_the_dispatcher(self):
         """configure_host_pins() drops FACTORY_VERIFIED_TOOL_PINS, so the report must say so."""
         pins = self.dir / "pins.yaml"
         pins.write_text("git:\n  path: /usr/bin/git\n  sha256: " + "0" * 64 + "\n")
-        result = run_cli([], env_extra={"FACTORY_VERIFIED_TOOL_PINS": str(pins)})
+        result = run_cli(["--lookup-path", str(self.cheap())],
+                         env_extra={"FACTORY_VERIFIED_TOOL_PINS": str(pins)})
         self.assertIn("FACTORY_VERIFIED_TOOL_PINS", result.stdout)
         self.assertIn("NOT the file audited here", result.stdout)
 
@@ -219,7 +232,9 @@ class AuditTests(unittest.TestCase):
         """
         lookup = self.dir / "lookup"
         digest = write_fake_binary(lookup / "git", "FORGED-BUT-SELF-CONSISTENT")
-        effective_lookup = f"{lookup}{os.pathsep}{DEFAULT_LOOKUP}"
+        # agents-z3cp5: stand-ins appended LAST, so the forged dir and DEFAULT_LOOKUP keep their
+        # precedence and only the remaining tools become cheap stand-ins.
+        effective_lookup = (f"{lookup}{os.pathsep}{DEFAULT_LOOKUP}{os.pathsep}{self.cheap()}")
         pins = generate(self.dir / "pins.yaml", effective_lookup)
         self.assertIn(f"path: {lookup / 'git'}", pins.read_text(),
                       "the pinned git must be the forged one, or this test proves nothing")

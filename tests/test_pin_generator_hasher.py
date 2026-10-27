@@ -24,7 +24,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 ROOT = Path(__file__).resolve().parent.parent
+# agents-z3cp5: stand-ins for the tools the generator hashes, so a run costs seconds not minutes.
+# The list and the drift contract live in one place for every module that runs the generator.
+from cheap_tool_pins import (  # noqa: E402
+    CHEAP_TOOL_NAMES, declared_tool_names, drifted_tool_names, stage_cheap_tools)
 GENERATOR = ROOT / "tools" / "generate-tool-pins.sh"
 FAKE_HASH = "0" * 64
 
@@ -39,25 +45,7 @@ FAKE_HASH = "0" * 64
 # 600 s is ~8x the measured cost and still bounds a wedged script. Re-measure before replacing it.
 _GENERATOR_GUARD_S = 600
 
-# WHY THESE ARMS WERE MINUTES LONG (agents-z3cp5). The generator hashes EVERY trusted tool it
-# resolves, twice, and it resolves them from the host. On this VM that is 73.09 s a run (measured
-# 2026-10-27) because the host carries a 249 MB `claude` and a full node/pi tree, and this module
-# runs the real script six times. Nothing here asserts how BIG a binary is or which tools exist -
-# every arm asserts where a HASHER, or a pin's reference value, may come from - so the tools each arm
-# does not name can be tiny stand-ins. Measured with the stand-ins in the lookup: 6.49 s a run
-# (11x cheaper), which is what makes this module gateable at all.
-CHEAP_TOOL_NAMES = ("agentapi", "bd", "bwrap", "claude", "gh", "git", "gitleaks", "node", "npm",
-                    "npx", "pi", "semgrep")
 
-
-def stage_cheap_tools(directory):
-    """Tiny stand-ins for every tool the generator pins, so a run costs seconds, not minutes."""
-    directory.mkdir(parents=True, exist_ok=True)
-    for name in CHEAP_TOOL_NAMES:
-        path = directory / name
-        path.write_text(f'#!/bin/sh\necho "{name} stand-in"\n', encoding="utf-8")
-        path.chmod(0o755)
-    return directory
 
 
 @unittest.skipUnless(GENERATOR.exists(), "generator not present")
@@ -224,11 +212,12 @@ class TestTheCheapToolSetCoversEveryToolTheGeneratorPins(unittest.TestCase):
     """
 
     def test_the_stand_ins_cover_exactly_the_tools_the_generator_pins(self):
-        text = GENERATOR.read_text(encoding="utf-8")
-        declared = re.search(r'^TOOLS="([^"]*)"$', text, re.M)
-        self.assertIsNotNone(declared, "the generator's TOOLS line must stay parseable by this contract")
-        self.assertEqual(sorted(declared.group(1).split()), sorted(CHEAP_TOOL_NAMES),
-                         "the stand-in set and the generator's tool list have drifted apart")
+        self.assertIsNotNone(declared_tool_names(GENERATOR),
+                             "the generator's TOOLS line must stay parseable by this contract")
+        self.assertEqual(drifted_tool_names(GENERATOR), [],
+                         "the stand-in set and the generator's tool list have drifted apart: a tool "
+                         "without a stand-in makes every arm in this module hash the real binary "
+                         "again, so seconds become minutes")
 
 
 @unittest.skipUnless(GENERATOR.exists(), "generator not present")
