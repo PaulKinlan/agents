@@ -1038,6 +1038,98 @@ printf '%s]}}\\n' "$out"
         self.assertGreater(len(owner), 1, f"the marker must name the process start time, got {owner!r}")
 
 
+# A candidate list wide enough to plan more calls than a generous declaration can pay for.
+WIDE_PREPASS = f'''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = [
+    {{
+        "candidate_id": f"cand-perf-{{i:03d}}",
+        "rule_id": "layout-thrashing-forced-reflow",
+        "path": f"src/file{{i}}.ts",
+        "line_number": i + 1,
+        "severity": "high",
+        "snippet": "el.offsetWidth",
+    }}
+    for i in range(20)
+]
+open(args.output, "w", encoding="utf-8").write(json.dumps({{"candidates": candidates}}))
+'''
+
+# 20 candidates at 4 per call is 5 calls; 5 x 10 min = 50 min, i.e. more than the 45-minute ceiling.
+CEILING_BOUND_YAML = AGENT_YAML.replace("max_minutes: 5", "max_minutes: 10").replace(
+    "max_candidates_per_call: 3", "max_candidates_per_call: 4")
+
+
+class TestTheBudgetPressureIsNamed(BatchedStation):
+    """agents-zwq8l: a plan the ceiling cannot fund is STATED with both numbers, in the run.
+
+    vuln-verify planned 14 calls of 15 min against the 45-minute ceiling: 210 min of declared work,
+    45 min funded, every call silently cut to a fair share (171.693 s once the pre-pass had spent
+    266 s), and the station died on batch 1 naming a timeout instead of the plan that could not be
+    paid for. The dispatcher now says it at plan time and records what each attempt was GIVEN and what
+    it COST - so "starved" and "genuinely slow" are distinguishable without another instrumented
+    nightly (which is what agents-dplrf asked for instead of a blind timeout increase).
+    """
+
+    def stage(self, yaml_text, prepass):
+        # Staged explicitly rather than by overriding agent(): the two cases need DIFFERENT candidate
+        # lists (20 planned calls vs the harness's 8), and an override silently gave both of them 20.
+        BatchedStation.agent(self, yaml_text)
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(
+            prepass, encoding="utf-8")
+
+    def test_a_ceiling_bound_plan_names_both_numbers_and_its_pressure(self):
+        self.stage(CEILING_BOUND_YAML, WIDE_PREPASS)
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+        # The sentence carries the arithmetic that decides whether a call can finish: what the plan
+        # asked for, what the station was granted, and the allowance each call is really reduced to.
+        self.assertIn("[budget-pressure]", res.stdout, res.stdout[-2000:])
+        self.assertIn("5 call(s) x 10 min declared = 50 min", res.stdout)
+        self.assertIn("funded 45 min", res.stdout)
+        self.assertIn("each call gets 540.0s instead of the declared 600s", res.stdout)
+        self.assertIn("only 4 of them fit at the declared allowance", res.stdout)
+
+        evidence = json.loads((self.run_dir() / "engine_calls.json").read_text(encoding="utf-8"))
+        pressure = evidence["plan"]["funding_pressure"]
+        self.assertIsNotNone(pressure, "the plan is over budget and the artifact must say so")
+        self.assertEqual(pressure["planned_seconds"], 5 * 600)
+        self.assertEqual(pressure["funded_seconds"], 2700)
+        self.assertEqual(pressure["calls_funded_at_declared"], 4)
+        self.assertEqual(evidence["plan"]["batch_candidates"], [4, 4, 4, 4, 4])
+
+        # Per-call evidence: what each call was GIVEN and what it COST, one record per attempt.
+        self.assertEqual(len(evidence["calls"]), 5, evidence["calls"])
+        self.assertEqual(sum(call["candidates"] for call in evidence["calls"]), 20,
+                         "every presented candidate is accounted for in the timing evidence")
+        for call in evidence["calls"]:
+            self.assertGreater(call["prompt_bytes"], 0)
+            self.assertIsNotNone(call["allowance_seconds"],
+                                 "an allowance of None would record nothing about the share it got")
+            self.assertGreaterEqual(call["elapsed_seconds"], 0.0)
+            self.assertEqual(call["exit_code"], 0)
+            self.assertEqual(call["outcome"], "ok")
+
+    def test_an_affordable_plan_stays_silent(self):
+        # The other half of the bound: 3 calls x 5 min = 15 min fits, so no warning - a warning on
+        # every ordinary batched station is a warning nobody reads.
+        self.stage(AGENT_YAML, PREPASS)
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("[budget-pressure]", res.stdout)
+        evidence = json.loads((self.run_dir() / "engine_calls.json").read_text(encoding="utf-8"))
+        self.assertIsNone(evidence["plan"]["funding_pressure"])
+        self.assertEqual(len(evidence["calls"]), 3,
+                         "the timing evidence is recorded for a plan that fits, too")
+
+
 class TestTheSweepGraceIsNotSilentlyCrossed(BatchedStation):
     """agents-6ep5s (review of agents-xm2xc): a station deadline must not reach the run-sweep grace.
 
