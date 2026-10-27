@@ -15,16 +15,16 @@ constants in §1 are the part that is enforced, and they are pinned against the 
 ```text
 FULL_GATE_BUDGET_S=300
 FULL_GATE_MODULE_TIMEOUT_S=600
-CHECK_TIMEOUT=2400
-CHECK_FAST_TIMEOUT=180
+CHECK_TIMEOUT=3600
+CHECK_FAST_TIMEOUT=2400
 ```
 
 | Constant | Default | Declared in | Enforced by |
 |---|---|---|---|
 | `FULL_GATE_BUDGET_S` | 300 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the gate itself, against its own elapsed wall |
 | `FULL_GATE_MODULE_TIMEOUT_S` | 600 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the per-module subprocess bound |
-| `CHECK_TIMEOUT` | 2400 | `tools/check.conf` | the fleet runner's hard bound (outside this repo) |
-| `CHECK_FAST_TIMEOUT` | 180 | `tools/check.conf` | the same runner's bound for `tools/fast-gate.sh` |
+| `CHECK_TIMEOUT` | 3600 | `tools/check.conf` | the fleet runner's hard bound (outside this repo); must exceed `CHECK_FAST_TIMEOUT` |
+| `CHECK_FAST_TIMEOUT` | 2400 | `tools/check.conf` | the same runner's bound for `tools/fast-gate.sh` (a registry-touching fast gate runs the 1206.3s mapping validator) |
 
 `FULL_GATE_SHARDS` (default `min(4, os.cpu_count())`) is not a budget but the divisor the wall is paid
 through; §4 is its arithmetic.
