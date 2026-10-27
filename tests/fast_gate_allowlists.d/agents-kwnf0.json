@@ -1,0 +1,9 @@
+{
+  "kind": "consumer_coverage",
+  "declared_by": "agents-kwnf0 - test_audit_deps reads the declared station budget with load_yaml as a utility; the yaml_mini contract is asserted by its own suite",
+  "modules": {
+    "yaml_mini": [
+      "tests/test_audit_deps.py"
+    ]
+  }
+}
