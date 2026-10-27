@@ -161,7 +161,16 @@ def run_module(module):
         child_env = dict(os.environ, FULL_GATE_SHARD_CHILD="1")
         result = subprocess.run([sys.executable, "-u", "-m", "unittest", module, "-v"],
                                 env=child_env, capture_output=True, text=True, errors="replace",
-                                timeout=positive_int("FULL_GATE_MODULE_TIMEOUT_S", 240),
+                                # 600, not 240: this default is what EXTERNAL CI sees, because the
+                                # host's per-VM env override (FULL_GATE_MODULE_TIMEOUT_S in \
+                                # ~/.fleet/check.conf) does not exist there. At 240 a module holding a
+                                # COLD Dolt bootstrap is killed mid-bootstrap and reports no verdict at
+                                # all - tests.test_bd_json_contract measured 268.3s on 2026-10-27 with
+                                # ~100s of that being `bd init` building a Dolt DB from nothing, which
+                                # is work, not a hang. 600 keeps 2.2x headroom over the slowest module
+                                # that is legitimately slow for this reason; genuinely runaway modules
+                                # are still bounded, and FULL_GATE_BUDGET_S remains the outer ceiling.
+                                timeout=positive_int("FULL_GATE_MODULE_TIMEOUT_S", 600),
                                 check=False)
         output = result.stdout + result.stderr
         rc = result.returncode
