@@ -444,7 +444,7 @@ _fast_gate_arms_load() {
       *$'\n'"$_new"$'\n'*) echo "fast-gate: FAIL: two arm fragments register the same stage: $_new" >&2; return 1 ;;
     esac
     _seen_stages="$_seen_stages$_new"$'\n'
-    while IFS= read -r _line; do
+    while IFS= read -r _line || [ -n "$_line" ]; do
       case "$_line" in
         *"# no arm in this fragment matched"*) continue ;;          # the loader's own no-match fallback
         "    "*) _pat="${_line#"    "}" ;;                          # an arm is indented exactly four spaces
@@ -476,7 +476,15 @@ _fast_gate_arms_load() {
     # shell's own reader costs milliseconds and, being a builtin, cannot be starved by the other lanes on
     # this box. Equivalence with the sed expression is checked fragment by fragment below in this commit's
     # message: same skip of the loader's own fallback line, same first-character rule, same end at the first
-    # ')'.
+    # ').
+    # agents-ki8p8: `|| [ -n "$_line" ]` is NOT redundant. POSIX `read` returns non-zero when it hits EOF
+    # without a trailing newline, so a bare `while read` DROPS that last partial line - and GNU sed, which
+    # this replaced, processes it. A fragment whose final line carries an arm pattern and no trailing
+    # newline therefore lost the pattern silently: it never reached _seen_patterns, so the duplicate-pattern
+    # guard (one pattern, one home) could not fire on it, and two fragments could claim the same pattern
+    # undetected. Verified against the reviewer's repro (a fragment ending "    last-no-newline) q ;;" with
+    # no trailing newline): it yields the pattern, exactly as the sed expression did. check-cmd.sh's
+    # _read_conf_keys already carries this same guard for the same reason.
     done < "$_frag"
   done <<< "$FAST_GATE_ARM_FRAGMENTS"
   case "$FAST_GATE_ARM_STAGES" in
