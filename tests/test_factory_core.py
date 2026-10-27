@@ -355,18 +355,11 @@ class TestDispatcherBudget(unittest.TestCase):
         Without enforcement this test would sit for the stub's full 60 s and then report a
         clean zero-finding run — the failure mode the audit observed with a stale auth key.
 
-        THE STATION CLOCK IS FROZEN (agents-rdkqf). On a real clock, gate load let the
-        dispatcher's own setup (adapter copy, bwrap binds, validation) eat the whole 15 s budget
-        before the engine step, and the station exited through the exhausted-before-engine
-        pre-check (lib/budget.py timeout_for) instead of the engine kill: red on a healthy delta
-        (measured: fast-gate job 1fbcf023 on a comments-only change) AND vacuous - the hung
-        engine never launched, so that run proved nothing about killing one. With the clock
-        frozen, setup charges nothing, and the engine step is offered 2.7 s of the declared
-        3 s after call_timeout reserves 10% (0.3 s) for findings dispatch. The real
-        run_station_command kills the real sleep-60 stub at the real
-        communicate() expiry. Everything load-bearing stays real - budget arithmetic, the
-        group kill, the StationTimeout text; only the clock SOURCE is fake, and budget
-        construction from yaml is pinned by lib/budget's own tests.
+        THE STATION CLOCK IS FROZEN (agents-rdkqf), so load-dependent setup cannot
+        exhaust the 3 s budget before the real engine kill. The real sleep-60 stub is
+        killed at communicate() expiry. On attempt 1, this zero-output kill now raises
+        SilentStationError with the budget-expiry reason, allowing one station-level
+        retry; produced-output and retry-attempt timeouts stay terminal.
         """
         def frozen_budget(agent_cfg, label="station", override_minutes=None):
             """Real StationBudget arithmetic over a clock that never advances (agents-rdkqf)."""
@@ -415,15 +408,69 @@ class TestDispatcherBudget(unittest.TestCase):
             with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
                  mock.patch.object(factory_cli, "budget_for", frozen_budget), \
                  mock.patch.dict(os.environ, env, clear=True):
-                with self.assertRaises(factory_cli.StationTimeout) as ctx:
+                with self.assertRaises(factory_cli.SilentStationError) as ctx:
                     factory_cli.run_agent("hung", str(target), engine_arg="pi")
             elapsed = time.monotonic() - started
-            self.assertIn("engine 'pi'", str(ctx.exception))
+            self.assertIn("silent station", str(ctx.exception))
             self.assertIn("station budget", str(ctx.exception))
-            # elapsed includes dispatcher setup, the load-dependent part; the budget itself only
-            # ever funds the 3 s engine allowance. Still sound as the enforcement pin: an
-            # unenforced run sits out the stub's full 60 s sleep.
+            self.assertIn("engine 'pi'", str(ctx.exception))
+            # Setup is load-dependent, but an unenforced stub would sleep for 60 s.
             self.assertLess(elapsed, 45, "the hung engine was not stopped at its budget")
+
+    def test_a_retry_attempt_silent_hang_stays_terminal_timeout(self):
+        """agents-1ansb: the silent-timeout retry is ONE. A station that hangs with no output
+        on its RETRY attempt (attempt=2) stays the terminal StationTimeout it always was -
+        reported TIMEOUT, never silently retried a second time. Freeze the budget clock so
+        load-dependent setup cannot expire the budget before the engine is reached."""
+        def frozen_budget(agent_cfg, label="station", override_minutes=None):
+            minutes = (override_minutes if override_minutes is not None
+                       else (agent_cfg.get("budget") or {}).get("max_minutes"))
+            return StationBudget(minutes, label=label, clock=lambda: 0.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            (sandbox / "agents" / "hung").mkdir(parents=True)
+            (sandbox / "agents" / "hung" / "agent.yaml").write_text(
+                "name: hung\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                "budget: {max_minutes: 0.05}\n",  # 2.7 s engine window; setup uses the frozen clock
+                encoding="utf-8",
+            )
+            (sandbox / "lib" / "adapters").mkdir(parents=True)
+            adapter = sandbox / "lib" / "adapters" / "pi.sh"
+            shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
+            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            shutil.copyfile(FACTORY_ROOT / "lib" / "net_forward.py",
+                            sandbox / "lib" / "net_forward.py")
+            target = sandbox / "target"
+            target.mkdir()
+            bindir = sandbox / "bin"
+            bindir.mkdir()
+            stub = bindir / "pi"
+            stub.write_text("#!/usr/bin/env bash\nsleep 60\n", encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+            started = time.monotonic()
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.object(factory_cli, "budget_for", frozen_budget), \
+                 mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(factory_cli.StationTimeout) as ctx:
+                    factory_cli.run_agent("hung", str(target), engine_arg="pi", attempt=2)
+            elapsed = time.monotonic() - started
+            self.assertIn("station budget", str(ctx.exception))
+            self.assertNotIn("silent station", str(ctx.exception),
+                             "a retry-attempt hang must not reclassify as a silent station")
+            self.assertLess(elapsed, 45, "the hung retry was not stopped at its budget")
+            # The terminal TIMEOUT report is left in the attempt-2 run directory.
+            runs = sorted((sandbox / "runs").glob("hung-*attempt2*"))
+            self.assertEqual(len(runs), 1)
+            report = json.loads((runs[0] / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "TIMEOUT")
+            self.assertEqual(report["verdict"], "timeout")
 
 
 class TestDispatcherChildEnvironment(unittest.TestCase):

@@ -607,6 +607,69 @@ class TestLineAndon(unittest.TestCase):
             self.assertEqual(second_report["summary"], "stub")
 
     @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
+    def test_budget_killed_silent_engine_is_retried_once_and_recovers(self):
+        """agents-1ansb: a FIRST-attempt engine call the station budget killed with NO output
+        produced is the transient silent shape, so the station-level retry applies. The hung
+        first attempt is killed at its (deliberately tiny) budget leaving a 0-byte
+        model_output.txt, the repair-retry answers, and the line completes COMPLETE - instead
+        of the whole nightly losing the station's verdict to one hung model call (qa-station,
+        2026-10-27). The first attempt keeps its explicit timeout reason in its own run dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["hangrecover", "okprobe"])
+            sandbox._agent("hangrecover")
+            # 15 s: headroom so sandbox bind setup finishes before the engine step (the same
+            # budget test_factory_core.py's hung-engine test uses), then the engine dies.
+            (sandbox.root / "agents" / "hangrecover" / "agent.yaml").write_text(
+                "name: hangrecover\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                "budget: {max_minutes: 0.25}\n",
+                encoding="utf-8",
+            )
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = hangrecover ] && grep -q 'NO OUTPUT' <<<\"$prompt\"; then\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = hangrecover ]; then\n"
+                "  # First attempt: hang past the station budget, producing no output at all\n"
+                "  sleep 60\n"
+                "else\n"
+                "  echo 'unexpected agent' >&2; exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertTrue(result, "budget-killed-then-valid must recover via the silent retry")
+            self.assertIn("COMPLETE", output)
+            self.assertIn("repair-retry", output)
+            runs = sorted((sandbox.root / "runs").glob("hangrecover-*"))
+            self.assertEqual(len(runs), 2, f"exactly one retry: {[r.name for r in runs]}")
+            first = next(r for r in runs if "-attempt2" not in r.name)
+            second = next(r for r in runs if "-attempt2" in r.name)
+            first_reason = (first / "failure_reason.txt").read_text(encoding="utf-8")
+            self.assertIn("silent station", first_reason)
+            self.assertIn("station budget", first_reason,
+                          "the first attempt's reason must name the budget expiry that killed it")
+            first_report = json.loads((first / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(first_report["status"], "ERROR")
+            self.assertEqual(first_report["verdict"], "error")
+            second_report = json.loads((second / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(second_report["summary"], "stub")
+
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_silent_station_failing_after_retry_leaves_reason_in_run_dir_and_line_continues(self):
         """agents-h8i4: a station that remains silent after retry leaves an explicit reason
         in both run dirs, degrades to ERROR, and allows the line to continue as INCOMPLETE
