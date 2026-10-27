@@ -322,22 +322,53 @@ if [ "${1:-}" = "--check" ]; then
   # below names BOTH, because this detector is the thing that has to be trusted when it fires and an
   # assertion of the wrong cause is how a reader learns to ignore it. Measured 2026-10-12: the live
   # copy on the agents-factory VM was this second case.
-  if ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
+  # agents-d0yky: THIS COMPARISON USED TO FORK PER KEY. strace counts 15 `grep` processes (a -q existence
+  # test AND a -m1 extraction for every key, plus two -E enumerations) in 21 processes total, for a
+  # comparison of two small text files. tools/fast-gate.sh calls --check on EVERY lane's gate run, so this
+  # was paid by every fast gate and ~110 times by tests/test_fast_gate_mapping - the module the fleet's
+  # cost table holds up as the largest single item.
+  # Each file is now read ONCE into ordered keys plus lines, and the comparison is the shell's own. ORDER
+  # IS PRESERVED DELIBERATELY: the drifted-keys message lists tracked keys in tracked order and the extras
+  # after them, exactly as the greps did, because the message is read by operators and pinned by tests.
+  _read_conf_keys() {   # $1=file; sets _rk (keys, in file order), _rl (whole lines), _r_stamped
+    local _line _k
+    _rk=(); _rl=(); _r_stamped=0
+    [ -r "$1" ] || return 0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      case "$_line" in *"Project: agents-factory"*) _r_stamped=1 ;; esac
+      case "$_line" in *=*) ;; *) continue ;; esac
+      _k="${_line%%=*}"
+      case "$_k" in ""|*[!A-Z_]*) continue ;; esac
+      _rk+=("$_k"); _rl+=("$_line")
+    done < "$1"
+  }
+  _read_conf_keys "$dest"
+  _dest_keys=("${_rk[@]}"); _dest_lines=("${_rl[@]}"); _dest_stamped="$_r_stamped"
+  _read_conf_keys "$TRACKED"
+  _tracked_keys=("${_rk[@]}"); _tracked_lines=("${_rl[@]}")
+  if [ "$_dest_stamped" -eq 0 ]; then
     if [ "$quiet" -eq 0 ]; then
       echo "check-cmd: DRIFT: $dest carries no 'Project: agents-factory' stamp - it was written by another project on a shared-HOME host, or by an --install from before that stamp existed; $(install_cmd_for "$dest") stamps it either way" >&2
     fi
     note "no-project-stamp"
   fi
-  while IFS= read -r tracked_line; do
-    key="${tracked_line%%=*}"
-    if ! grep -q "^${key}=" "$dest" 2>/dev/null; then
+  for _ti in "${!_tracked_keys[@]}"; do
+    key="${_tracked_keys[$_ti]}"
+    tracked_line="${_tracked_lines[$_ti]}"
+    deployed_line=""
+    _found=0
+    for _di in "${!_dest_keys[@]}"; do
+      if [ "${_dest_keys[$_di]}" = "$key" ]; then
+        _found=1; deployed_line="${_dest_lines[$_di]}"; break
+      fi
+    done
+    if [ "$_found" -eq 0 ]; then
       if [ "$quiet" -eq 0 ]; then
         printf 'check-cmd: DRIFT: %s is missing from %s\n' "$key" "$dest" >&2
       fi
       note "${key}(missing)"
       continue
     fi
-    deployed_line="$(grep -m1 "^${key}=" "$dest")"
     if [ "$deployed_line" != "$tracked_line" ]; then
       if [ "$quiet" -eq 0 ]; then
         printf 'check-cmd: DRIFT: %s differs\n  tracked : %s\n  deployed: %s\n' \
@@ -345,16 +376,21 @@ if [ "${1:-}" = "--check" ]; then
       fi
       note "$key"
     fi
-  done < <(grep -E '^[A-Z_]+=' "$TRACKED")
+  done
   # A key the tracked file does not have is drift too: --install writes exactly the tracked keys.
-  while IFS= read -r deployed_key; do
-    if ! grep -q "^${deployed_key}=" "$TRACKED" 2>/dev/null; then
+  for _di in "${!_dest_keys[@]}"; do
+    deployed_key="${_dest_keys[$_di]}"
+    _known=0
+    for _ti in "${!_tracked_keys[@]}"; do
+      if [ "${_tracked_keys[$_ti]}" = "$deployed_key" ]; then _known=1; break; fi
+    done
+    if [ "$_known" -eq 0 ]; then
       if [ "$quiet" -eq 0 ]; then
         printf 'check-cmd: DRIFT: %s is in %s but not in %s\n' "$deployed_key" "$dest" "$TRACKED" >&2
       fi
       note "${deployed_key}(extra)"
     fi
-  done < <(grep -E '^[A-Z_]+=' "$dest" | sed 's/=.*//')
+  done
   if [ "$drift" -ne 0 ]; then
     if [ "$quiet" -eq 1 ]; then
       printf 'check-cmd: DRIFT keys: %s\n' "$drift_keys" >&2
