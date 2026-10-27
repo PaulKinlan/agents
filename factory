@@ -2394,7 +2394,20 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         if _attempt > 1:
                             # A retry is an extra engine call, so it is funded like a planned batch:
                             # one more call's declaration, measured from the station's start.
-                            budget.plan_calls(len(prompts) + len(batch_retries) + 1)
+                            _refund_calls = len(prompts) + len(batch_retries) + 1
+                            budget.plan_calls(_refund_calls)
+                            # agents-ysacs: A RETRY CAN DEEPEN THE STARVATION, so the banner is restated.
+                            # The ceiling stays bound while the fair share is divided by one more call, so
+                            # every remaining allowance SHRINKS (measured: 171.693 s at 14 calls becomes
+                            # less at 15). Printing the pressure once at plan time made the deepening
+                            # invisible exactly where an operator looks - the log - even though
+                            # engine_calls.json recorded the smaller per-call allowance afterwards.
+                            # Restated with the new number, and labelled, so a reader can tell the plan-time
+                            # line from a re-funding line.
+                            _refund_warning = budget_pressure_warning(budget, _refund_calls)
+                            if _refund_warning:
+                                print(f"  {_refund_warning} (re-funded for a batch retry: "
+                                      f"{_refund_calls} call(s) now)")
                         _call_label = (_batch_label if _attempt == 1
                                        else f"{_batch_label} retry {_attempt - 1}")
                         # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One

@@ -41,6 +41,14 @@ def stage_cheap_tools(directory: Path, exclude=()) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     for name in CHEAP_TOOL_NAMES:
         if name in exclude:
+            # agents-90ihz: EXCLUDING IS ALSO A PROMISE THAT THE NAME IS ABSENT. Re-staging the same
+            # directory with exclude=('git',) used to leave the earlier git stand-in in place, and exclude
+            # exists precisely for the arms whose subject is the real binary (git, bd, gitleaks) - a stale
+            # stand-in there makes the arm pass for the wrong reason, which is the failure mode these
+            # stand-ins were introduced to avoid. Unlink rather than skip.
+            stale = directory / name
+            if stale.exists():
+                stale.unlink()
             continue
         path = directory / name
         path.write_text(f'#!/bin/sh\necho "{name} stand-in"\n', encoding="utf-8")

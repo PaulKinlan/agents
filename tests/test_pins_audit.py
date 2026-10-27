@@ -232,9 +232,13 @@ class AuditTests(unittest.TestCase):
         """
         lookup = self.dir / "lookup"
         digest = write_fake_binary(lookup / "git", "FORGED-BUT-SELF-CONSISTENT")
-        # agents-z3cp5: stand-ins appended LAST, so the forged dir and DEFAULT_LOOKUP keep their
-        # precedence and only the remaining tools become cheap stand-ins.
-        effective_lookup = (f"{lookup}{os.pathsep}{DEFAULT_LOOKUP}{os.pathsep}{self.cheap()}")
+        # agents-sngkz: the stand-ins go SECOND, not last. This arm's subject is that the FORGED dir, which
+        # is first, is what gets pinned - nothing about DEFAULT_LOOKUP. With the stand-ins last, the real
+        # host tools in DEFAULT_LOOKUP (~/.local/bin, ~/.local/pi: the 249 MB claude, node, pi) beat them and
+        # this one arm still hashed the whole real set twice, in generate() AND in the audit's re-derivation:
+        # 181.8s in the b9d95348 fast-gate log while the other cheapened arms in this file cost seconds.
+        # Forged first still wins for git, because resolve_in_lookup takes the first match in order.
+        effective_lookup = (f"{lookup}{os.pathsep}{self.cheap()}{os.pathsep}{DEFAULT_LOOKUP}")
         pins = generate(self.dir / "pins.yaml", effective_lookup)
         self.assertIn(f"path: {lookup / 'git'}", pins.read_text(),
                       "the pinned git must be the forged one, or this test proves nothing")

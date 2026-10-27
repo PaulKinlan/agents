@@ -858,7 +858,7 @@ class TestTheCliGuardIsOneNumber(unittest.TestCase):
     def test_no_literal_timeout_remains_for_this_cli(self):
         """A reintroduced literal is how the file drifted to three opinions in the first place."""
         source = (ROOT / "tests" / "test_sinks.py").read_text(encoding="utf-8")
-        literals = re.findall(r"timeout=(\d+)", source)
+        # agents-kevst: [0-9.]+ rather than \d+, because a FLOAT literal is the same drift: the reviewer\n        # re-inlined `timeout=1.5` and the integer-only pattern found nothing, so the guard passed\n        # while the bound it exists to protect was gone. Any numeric literal, however spelled.\n        literals = re.findall(r"timeout=([0-9.]+)", source)
         self.assertEqual(
             literals, [],
             "every subprocess bound in this file must use _CLI_GUARD_S; found literal timeout(s) "
