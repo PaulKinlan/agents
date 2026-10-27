@@ -858,7 +858,16 @@ class TestTheCliGuardIsOneNumber(unittest.TestCase):
     def test_no_literal_timeout_remains_for_this_cli(self):
         """A reintroduced literal is how the file drifted to three opinions in the first place."""
         source = (ROOT / "tests" / "test_sinks.py").read_text(encoding="utf-8")
-        # agents-kevst: [0-9.]+ rather than \d+, because a FLOAT literal is the same drift: the reviewer\n        # re-inlined `timeout=1.5` and the integer-only pattern found nothing, so the guard passed\n        # while the bound it exists to protect was gone. Any numeric literal, however spelled.\n        literals = re.findall(r"timeout=([0-9.]+)", source)
+        # COUNT CODE, NOT PROSE - the same rule tests/test_fast_gate_mapping.py applies to the arm table,
+        # and I learned it the hard way in this very guard: an earlier version of this comment quoted the
+        # reviewer's float mutant verbatim, and the raw scan then found the mutant in the COMMENT and failed
+        # the test (agents-kevst). A comment explaining a bound is prose; a literal in an executed line is
+        # the drift. Only full-line comments are dropped, so a literal quoted in a TRAILING comment still
+        # trips it - erring towards noise on the side that protects the bound.
+        code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+        # [0-9.]+ rather than \d+ (agents-kevst): a FLOAT literal is the same drift with different
+        # punctuation, and the integer-only pattern let the reviewer's float mutant through silently.
+        literals = re.findall(r"timeout=([0-9.]+)", code)
         self.assertEqual(
             literals, [],
             "every subprocess bound in this file must use _CLI_GUARD_S; found literal timeout(s) "
