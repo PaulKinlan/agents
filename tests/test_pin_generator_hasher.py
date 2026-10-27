@@ -28,6 +28,17 @@ ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-tool-pins.sh"
 FAKE_HASH = "0" * 64
 
+# A HANG GUARD, NOT A MEASUREMENT (agents-h71zr's rule, RE-DERIVED here by agents-fzcs6). Six arms in
+# this module run the REAL generator, and every one of them used a literal 120 s. ONE run costs 73.09 s
+# on this VM (measured 2026-10-27: 35 tools resolved, each hashed twice - sha256sum plus an independent
+# `python3 -I` digest (agents-0poh) - at load 4.66), so 120 s was 1.6x a single run; inside the fast
+# gate, which runs four modules at once, the arms ERRORED with subprocess.TimeoutExpired. That is the
+# same defect agents-h71zr fixed for tests/test_tool_pins.py, in a DIFFERENT file that runs the same
+# expensive generator - which is why this number now lives in a named constant instead of a literal.
+# Not a skip: dropping these arms would drop the hasher contract on exactly the hosts where it matters.
+# 600 s is ~8x the measured cost and still bounds a wedged script. Re-measure before replacing it.
+_GENERATOR_GUARD_S = 600
+
 
 @unittest.skipUnless(GENERATOR.exists(), "generator not present")
 class TestPinGeneratorHasherIsNotCallerSupplied(unittest.TestCase):
@@ -47,7 +58,7 @@ class TestPinGeneratorHasherIsNotCallerSupplied(unittest.TestCase):
         tool.chmod(0o755)
         subprocess.run(
             ["bash", str(GENERATOR), str(out / "pins.yaml"), "--lookup-path", str(planted)],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={"PATH": f"{planted}:/usr/bin:/bin", "HOME": tmp},
         )
         return (out / "pins.yaml")
@@ -132,7 +143,7 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
         else:
             cmd.append(f"--lookup-path={evil}")
         proc = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={"PATH": "/usr/bin:/bin", "HOME": tmp},
         )
         return proc, pins_file
@@ -167,7 +178,7 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
             proc = subprocess.run(
                 ["bash", str(GENERATOR), str(out / "pins.yaml"),
                  "--lookup-path", f"{tmpd}/operator bin:{tmpd}"],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={"PATH": "/usr/bin:/bin", "HOME": tmp},
             )
             self.assertEqual(proc.returncode, 0,
@@ -212,7 +223,7 @@ class TestTheIndependentDigestMustAgree(unittest.TestCase):
         out.mkdir()
         return subprocess.run(
             ["bash", str(copy), str(out / "pins.yaml")],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
 
     def test_a_wrong_digest_hasher_is_refused_rather_than_trusted(self):
@@ -286,7 +297,7 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
             out.mkdir()
             res = subprocess.run(
                 ["bash", str(GENERATOR), str(out / "pins.yaml")],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={"PYTHONPATH": str(shadow), "PATH": "/usr/local/bin:/usr/bin:/bin",
                      "HOME": tmp})
             self.assertEqual(res.returncode, 0,
@@ -326,7 +337,7 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
             res = subprocess.run(
                 ["bash", str(GENERATOR), str(out / "pins.yaml")],
                 # agents-yuk9: the shadow lives HERE, so this arm can actually fail.
-                cwd=tmp, capture_output=True, text=True, timeout=120,
+                cwd=tmp, capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
             self.assertEqual(res.returncode, 0, f"generation must succeed: {res.stderr}")
             hashes = re.findall(r"^\s+sha256: ([0-9a-f]{64})$",

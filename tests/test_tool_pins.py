@@ -42,7 +42,15 @@ from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
 # Do not turn this into a skip (that drops the contract on exactly the hosts where it matters) and do
 # not lower it; re-measure before REPLACING it, since a per-run cost below this bound is what the
 # number means.
-_GENERATOR_GUARD_S = 240
+#
+# RE-MEASURED AND REPLACED (agents-fzcs6), exactly as the paragraph above instructs. On 2026-10-27 one
+# run costs 73.09 s (/usr/bin/time bash tools/generate-tool-pins.sh /tmp/tp.yaml -> WALL 73.09 s, 35
+# tools resolved, load 4.66), i.e. 1.9x the 38.59 s measured when this number was set - the resolved
+# tool set has grown. 240 s was therefore 3.3x a single run, and this module runs the real script TEN
+# times; under the fast gate's four parallel shards that is not headroom. 600 s is ~8x the fresh
+# measurement: still a hang guard, and no longer a load-dependent failure for an author who did not
+# touch the generator.
+_GENERATOR_GUARD_S = 600
 
 
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:

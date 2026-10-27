@@ -36,9 +36,12 @@ sys.path.insert(0, str(ROOT))
 # failure exits 2 and prints [environment failure]' - nothing about wall clock. MEASURED here, alone,
 # on an otherwise quiet host: 5.4s (2026-10-24, `python3 -m unittest` of the single case). The
 # measurement sits beside the guard so the number can be re-checked rather than trusted; 240s is ~44x
-# it and matches the named-guard value the two earlier instances of this class took
-# (tests/test_tool_pins.py:_GENERATOR_GUARD_S, tests/test_bd_json_contract.py:_BD_GUARD_S). It is
-# deliberately NOT a skip-when-slow arm: a factory that genuinely wedges still fails HERE.
+# it. It USED to say it "matches the named-guard value the two earlier instances of this class took"
+# (tests/test_tool_pins.py:_GENERATOR_GUARD_S, tests/test_bd_json_contract.py:_BD_GUARD_S) - those two
+# have since been re-derived upward by agents-fzcs6 (600s each) because their own measured costs grew,
+# and no shared value is claimed here any more: each guard is derived from the cost it guards, which is
+# the only reason a number like this means anything. 240s stays because this subprocess still costs
+# 5.4s. It is deliberately NOT a skip-when-slow arm: a factory that genuinely wedges still fails HERE.
 _FACTORY_RUN_GUARD_S = 240
 
 # The tracked-file instrument (tests/__init__.py). The dispatcher fixture stages its runtime from GIT'S

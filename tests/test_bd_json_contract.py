@@ -21,7 +21,17 @@ from lib.sinks.beads import _bd_json
 # guard here failed the fast gate for every lib/findings change - and the merger's full gate with it - for a
 # reason no author could fix. Do not make this a skip: that would drop the contract on exactly the hosts
 # where it matters.
-_BD_GUARD_S = 240
+#
+# RAISED AGAIN FOR A DIFFERENT REASON (agents-fzcs6): the 240 s above is above this test's OWN cost
+# (99.20 s), but it is not above the cost of WAITING FOR `bd` AT ALL on this VM. tests run with the
+# fleet's `bd` shim, which serialises every bd call VM-wide on one flock (fleet/bin/bd, fleet-tm5/e10 -
+# the embedded Dolt DB allows one process at a time), so a cold `bd init` here queues behind whatever the
+# lanes, the inbox and the dashboard are doing. Measured during the failing full gate: `bd init` was
+# still waiting at 240 s while a concurrent lane held the lock. A bound has to cover the queue, not only
+# the work, or it fails for contention rather than for anything the test did. 600 s is ~6x the isolated
+# measurement and covers a busy fleet; the structural fix (running bd-touching modules in a serial phase
+# instead of among four parallel shards) is a gate-scheduling decision and is NOT made here.
+_BD_GUARD_S = 600
 
 
 def _real_bd():
