@@ -60,15 +60,24 @@ DEFAULT_LOOKUP = os.pathsep.join([
     str(Path.home() / ".local" / "pi"),
 ])
 
-# HOW LONG THE RE-DERIVATION MAY TAKE (agents-u4k7). REQUIRED, not decorative: this module
-# shells out to the generator, and the repo's own guard
-# (tests/test_budget.py::TestNoUnboundedSubprocess) refuses an unbounded subprocess call - it
-# caught this call and was right to. CHOSEN, NOT COPIED: the real tools/generate-tool-pins.sh
-# takes ~6.0 s on this host (measured, 9 tools resolved and hashed), and this VM runs parallel
-# lanes plus one heavy-gate slot, so 120 s is 20x the measured cost - room for a host 20x
-# slower, while a generator that genuinely hangs still surfaces as "cannot run" well inside the
-# fast gate's own 360 s bound instead of hanging a gate.
-GENERATOR_TIMEOUT_SECONDS = 120
+# HOW LONG THE RE-DERIVATION MAY TAKE (agents-u4k7; RE-DERIVED by agents-fzcs6 because the last
+# derivation went stale in the direction that hurts). REQUIRED, not decorative: this module shells out to
+# the generator, and the repo's own guard (tests/test_budget.py::TestNoUnboundedSubprocess) refuses an
+# unbounded subprocess call - it caught this call and was right to.
+#
+# NOT CHOSEN, COPIED-FROM-A-MEASUREMENT: the 120 s this replaces was justified as "20x the measured cost"
+# of ~6.0 s with 9 tools resolved. The resolved set has since grown to 35 tools, and ONE run now costs
+# 73.09 s on this VM (measured 2026-10-27: /usr/bin/time bash tools/generate-tool-pins.sh /tmp/tp.yaml
+# -> WALL 73.09 s, 35 pins written, load 4.66). So 120 s was 1.6x the real cost, not 20x - and under the
+# fast gate's four parallel shards it expired, which turns a HEALTHY host into exit 2 ("could not be
+# checked") and made tests/test_pins_audit.py's forgery arm read 2 where the audit had found nothing
+# wrong. A bound calibrated against a measurement of a file that has since quadrupled is not a bound, it
+# is a leftover.
+#
+# 600 s is ~8x the fresh measurement: room for a heavily contended host, while a generator that genuinely
+# hangs still surfaces as "cannot run" well inside the full gate's own module bound instead of hanging a
+# gate. Re-measure before replacing THIS number, the same rule tests/test_tool_pins.py states.
+GENERATOR_TIMEOUT_SECONDS = 600
 
 
 def _tp():
@@ -161,8 +170,8 @@ def _rederive(lookup: str, tmpdir: str) -> "tuple[Dict[str, Dict[str, str]], Opt
         # the audit saying "cannot run" (exit 2 via rederivation_error), because a traceback is a
         # crash and a silently skipped re-derivation would read as "the file agrees".
         return {}, (f"{GENERATOR.name} did not finish within {GENERATOR_TIMEOUT_SECONDS}s "
-                    "(measured: 6.0s on an idle host) - the fresh derivation is UNKNOWN, "
-                    "NOT an agreement")
+                    "(measured: 73.09s for 35 resolved tools on this VM, 2026-10-27) - the fresh "
+                    "derivation is UNKNOWN, NOT an agreement")
     if proc.returncode != 0 or not out.exists():
         return {}, (f"{GENERATOR.name} exited {proc.returncode}: "
                     f"{(proc.stderr or proc.stdout).strip()[-200:]}")

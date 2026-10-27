@@ -20,6 +20,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # the tests dir, for tests/cheap_tool_pins.py
+
+# agents-z3cp5: the generator hashes every trusted tool the host has, twice - 73.09 s a run on this
+# VM (measured 2026-10-27), because of a 249 MB `claude` and the node/pi trees. Every arm here
+# asserts WHERE a pin comes from, so the tools an arm does not assert about are stand-ins
+# (6.49 s a run). See tests/cheap_tool_pins.py.
+from cheap_tool_pins import stage_cheap_tools  # noqa: E402
+
 from lib import tool_pins as tool_pins_module
 from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
                            allowlisted_path, configure_host_pins, host_pins_path, load_tool_pins,
@@ -42,7 +50,15 @@ from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
 # Do not turn this into a skip (that drops the contract on exactly the hosts where it matters) and do
 # not lower it; re-measure before REPLACING it, since a per-run cost below this bound is what the
 # number means.
-_GENERATOR_GUARD_S = 240
+#
+# RE-MEASURED AND REPLACED (agents-fzcs6), exactly as the paragraph above instructs. On 2026-10-27 one
+# run costs 73.09 s (/usr/bin/time bash tools/generate-tool-pins.sh /tmp/tp.yaml -> WALL 73.09 s, 35
+# tools resolved, load 4.66), i.e. 1.9x the 38.59 s measured when this number was set - the resolved
+# tool set has grown. 240 s was therefore 3.3x a single run, and this module runs the real script TEN
+# times; under the fast gate's four parallel shards that is not headroom. 600 s is ~8x the fresh
+# measurement: still a hang guard, and no longer a load-dependent failure for an author who did not
+# touch the generator.
+_GENERATOR_GUARD_S = 600
 
 
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -423,10 +439,23 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
         self.out = self.tmp / "tools.pins.yaml"
 
     def _run_generator(self, *extra_args):
+        # agents-z3cp5: stand-ins for the tools this class does not assert about, APPENDED so the
+        # fakebin plant keeps precedence. TWO are excluded on purpose, because this class asserts on
+        # their ABSENCE or on the REAL binary: `git` (the shadow arm asserts the real system git is
+        # pinned, so a git stand-in would make it pass for the wrong reason) and `gitleaks` (the
+        # unpinned arm plants it in the inherited PATH and requires "# gitleaks: not found", so a
+        # stand-in would pin it and prove the opposite of what the arm exists to prove).
+        cheap = stage_cheap_tools(self.tmp / "cheap-tools", exclude=("git", "gitleaks"))
+        args = list(extra_args)
+        if "--lookup-path" in args:
+            index = args.index("--lookup-path")
+            args[index + 1] = f"{args[index + 1]}:{cheap}"
+        else:
+            args.extend(["--lookup-path", str(cheap)])
         env = {"PATH": os.pathsep.join([str(self.fakebin), *self.LOOKUP_DIRS]),
                "HOME": str(self.tmp)}
         res = subprocess.run(
-            ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out), *extra_args],
+            ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out), *args],
             env=env, capture_output=True, text=True, timeout=_GENERATOR_GUARD_S)
         self.assertEqual(res.returncode, 0, res.stderr)
         return self.out.read_text(encoding="utf-8")
@@ -492,7 +521,10 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
             f"sha256sum() {{ echo '{self.BOGUS_HASH}  fake'; }}\n"
             "export -f git bwrap sha256sum\n"
             f"cd '{self.fakebin}'\n"
-            f"exec bash '{GenerateToolPinsScriptTests.SCRIPT}' '{self.out}'\n"
+            f"exec bash '{GenerateToolPinsScriptTests.SCRIPT}' '{self.out}'"
+            # agents-z3cp5: stand-ins for the tools this arm does not assert about. `git` is
+            # excluded: this arm asserts the REAL system git is pinned despite the CWD namesake.
+            f" --lookup-path '{stage_cheap_tools(self.tmp / 'cheap-tools', exclude=('git',))}'\n"
         )
         env = {"PATH": os.pathsep.join([str(self.fakebin), *self.LOOKUP_DIRS]),
                "HOME": str(self.tmp)}
@@ -526,7 +558,10 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
         env = {"PATH": os.pathsep.join(self.LOOKUP_DIRS), "HOME": str(self.tmp)}
         res = subprocess.run(
             ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out),
-             "--lookup-path", "oprel"],
+             # agents-z3cp5: the relative dir stays first (and is skipped as before); the absolute
+             # stand-ins after it exist only so the other tools are not hashed for real.
+             "--lookup-path",
+             f"oprel:{stage_cheap_tools(self.tmp / 'cheap-tools', exclude=('git',))}"],
             env=env, cwd=self.tmp, capture_output=True, text=True, timeout=_GENERATOR_GUARD_S)
         self.assertEqual(res.returncode, 0, res.stderr)
         body = self.out.read_text(encoding="utf-8")
@@ -826,9 +861,13 @@ class LookupPathContractTests(unittest.TestCase):
 
     def _generate(self, lookup: Path, out: Path) -> None:
         root = Path(__file__).resolve().parent.parent
+        # agents-z3cp5: stand-ins for the tools this arm does not assert about. `bd` is excluded -
+        # arm A pins a bd planted OUTSIDE the system dirs and its control asserts bd is absent
+        # without the flag, so a bd stand-in would defeat the arm's whole point.
+        cheap = stage_cheap_tools(Path(out.parent) / "cheap-tools", exclude=("bd",))
         res = subprocess.run(
             ["bash", str(root / "tools" / "generate-tool-pins.sh"),
-             str(out), "--lookup-path", str(lookup)],
+             str(out), "--lookup-path", f"{lookup}:{cheap}"],
             capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={**os.environ, "HOME": str(out.parent)},
         )
@@ -860,7 +899,8 @@ class LookupPathContractTests(unittest.TestCase):
             root = Path(__file__).resolve().parent.parent
             bare = tmpdir / "pins-bare.yaml"
             res = subprocess.run(
-                ["bash", str(root / "tools" / "generate-tool-pins.sh"), str(bare)],
+                ["bash", str(root / "tools" / "generate-tool-pins.sh"), str(bare),
+                 "--lookup-path", str(stage_cheap_tools(tmpdir / "cheap-tools", exclude=("bd",)))],
                 capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={**os.environ, "HOME": str(tmpdir)},
             )
@@ -927,9 +967,24 @@ class TheSkippedToolsAreAnnouncedTests(unittest.TestCase):
 
     SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "generate-tool-pins.sh"
 
+    # The tools this class exercises as ABSENT on this host (its own docstring names them). They are
+    # excluded from the stand-ins, so the "recorded not found" set stays non-vacuous while the rest of
+    # the host's binaries are not hashed for real (agents-z3cp5).
+    ABSENT_TOOLS = ("agentapi", "bd", "gitleaks", "semgrep")
+
     def _generate(self, tmpdir: Path, out: Path, *args: str) -> subprocess.CompletedProcess:
+        cheap = stage_cheap_tools(tmpdir / "cheap-tools", exclude=self.ABSENT_TOOLS)
+        argv = list(args)
+        # EXTEND the caller's own lookup, never replace it: the script takes the LAST --lookup-path,
+        # and these arms plant tools in dirs they pass themselves (my first attempt appended a second
+        # flag and silently discarded theirs - two arms went red for it).
+        if "--lookup-path" in argv:
+            index = argv.index("--lookup-path")
+            argv[index + 1] = f"{argv[index + 1]}:{cheap}"
+        else:
+            argv.extend(["--lookup-path", str(cheap)])
         res = subprocess.run(
-            ["bash", str(self.SCRIPT), str(out), *args],
+            ["bash", str(self.SCRIPT), str(out), *argv],
             capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={**os.environ, "HOME": str(tmpdir)},
         )

@@ -24,9 +24,28 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 ROOT = Path(__file__).resolve().parent.parent
+# agents-z3cp5: stand-ins for the tools the generator hashes, so a run costs seconds not minutes.
+# The list and the drift contract live in one place for every module that runs the generator.
+from cheap_tool_pins import (  # noqa: E402
+    CHEAP_TOOL_NAMES, declared_tool_names, drifted_tool_names, stage_cheap_tools)
 GENERATOR = ROOT / "tools" / "generate-tool-pins.sh"
 FAKE_HASH = "0" * 64
+
+# A HANG GUARD, NOT A MEASUREMENT (agents-h71zr's rule, RE-DERIVED here by agents-fzcs6). Six arms in
+# this module run the REAL generator, and every one of them used a literal 120 s. ONE run costs 73.09 s
+# on this VM (measured 2026-10-27: 35 tools resolved, each hashed twice - sha256sum plus an independent
+# `python3 -I` digest (agents-0poh) - at load 4.66), so 120 s was 1.6x a single run; inside the fast
+# gate, which runs four modules at once, the arms ERRORED with subprocess.TimeoutExpired. That is the
+# same defect agents-h71zr fixed for tests/test_tool_pins.py, in a DIFFERENT file that runs the same
+# expensive generator - which is why this number now lives in a named constant instead of a literal.
+# Not a skip: dropping these arms would drop the hasher contract on exactly the hosts where it matters.
+# 600 s is ~8x the measured cost and still bounds a wedged script. Re-measure before replacing it.
+_GENERATOR_GUARD_S = 600
+
+
 
 
 @unittest.skipUnless(GENERATOR.exists(), "generator not present")
@@ -45,9 +64,13 @@ class TestPinGeneratorHasherIsNotCallerSupplied(unittest.TestCase):
         tool = planted / "git"
         tool.write_text("#!/bin/sh\necho PWNED\n", encoding="utf-8")
         tool.chmod(0o755)
+        # agents-z3cp5: the cheap tool set is appended AFTER the plant, so the planted `git` above is
+        # still the one this arm pins; the other eleven tools are stand-ins instead of real binaries.
+        cheap = stage_cheap_tools(Path(tmp) / "cheap-tools")
         subprocess.run(
-            ["bash", str(GENERATOR), str(out / "pins.yaml"), "--lookup-path", str(planted)],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            ["bash", str(GENERATOR), str(out / "pins.yaml"), "--lookup-path",
+             f"{planted}:{cheap}"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={"PATH": f"{planted}:/usr/bin:/bin", "HOME": tmp},
         )
         return (out / "pins.yaml")
@@ -132,7 +155,7 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
         else:
             cmd.append(f"--lookup-path={evil}")
         proc = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={"PATH": "/usr/bin:/bin", "HOME": tmp},
         )
         return proc, pins_file
@@ -164,15 +187,37 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
             out = tmpd / "out"
             out.mkdir()
             os.makedirs(tmpd / "operator bin", exist_ok=True)
+            # agents-z3cp5: the two operator dirs keep their precedence; the cheap tool set is appended
+            # so the remaining tools are stand-ins.
+            cheap = stage_cheap_tools(tmpd / "cheap-tools")
             proc = subprocess.run(
                 ["bash", str(GENERATOR), str(out / "pins.yaml"),
-                 "--lookup-path", f"{tmpd}/operator bin:{tmpd}"],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                 "--lookup-path", f"{tmpd}/operator bin:{tmpd}:{cheap}"],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={"PATH": "/usr/bin:/bin", "HOME": tmp},
             )
             self.assertEqual(proc.returncode, 0,
                              f"a legitimate --lookup-path was rejected: {proc.stderr}")
             self.assertTrue((out / "pins.yaml").exists())
+
+
+@unittest.skipUnless(GENERATOR.exists(), "generator not present")
+class TestTheCheapToolSetCoversEveryToolTheGeneratorPins(unittest.TestCase):
+    """agents-z3cp5: the stand-ins must stay IN STEP with the generator's own tool list.
+
+    The arms above are only cheap while every tool the generator resolves has a stand-in. A tool
+    added to the script without a stand-in here silently makes a run hash the real binary again -
+    seconds become minutes, and the next person to hit it sees a timeout rather than a missing
+    stand-in. So the list is a CONTRACT with the script, asserted rather than remembered.
+    """
+
+    def test_the_stand_ins_cover_exactly_the_tools_the_generator_pins(self):
+        self.assertIsNotNone(declared_tool_names(GENERATOR),
+                             "the generator's TOOLS line must stay parseable by this contract")
+        self.assertEqual(drifted_tool_names(GENERATOR), [],
+                         "the stand-in set and the generator's tool list have drifted apart: a tool "
+                         "without a stand-in makes every arm in this module hash the real binary "
+                         "again, so seconds become minutes")
 
 
 @unittest.skipUnless(GENERATOR.exists(), "generator not present")
@@ -199,7 +244,8 @@ class TestTheIndependentDigestMustAgree(unittest.TestCase):
         text = GENERATOR.read_text(encoding="utf-8")
         new, n = re.subn(
             r'^SYSTEM_LOOKUP_PATH="[^"]*"$',
-            f'SYSTEM_LOOKUP_PATH="{planted_dir}:/usr/local/bin:/usr/bin:/bin"',
+            f'SYSTEM_LOOKUP_PATH="{planted_dir}:{stage_cheap_tools(Path(tmp) / "cheap-tools")}'
+            f':/usr/local/bin:/usr/bin:/bin"',
             text, count=1, flags=re.M)
         self.assertEqual(n, 1, "the confined lookup line must exist to be rewritten")
         self.assertNotIn(str(planted_dir), text, "the rewrite must be the only change")
@@ -212,7 +258,7 @@ class TestTheIndependentDigestMustAgree(unittest.TestCase):
         out.mkdir()
         return subprocess.run(
             ["bash", str(copy), str(out / "pins.yaml")],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
 
     def test_a_wrong_digest_hasher_is_refused_rather_than_trusted(self):
@@ -284,9 +330,12 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
                              "the plant must actually shadow stdlib, or this test proves nothing")
             out = Path(tmp) / "out"
             out.mkdir()
+            # agents-z3cp5: --lookup-path is unrelated to this arm's subject (which python digest
+            # supplies the reference value); it is here so the twelve tools are stand-ins.
             res = subprocess.run(
-                ["bash", str(GENERATOR), str(out / "pins.yaml")],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                ["bash", str(GENERATOR), str(out / "pins.yaml"),
+                 "--lookup-path", str(stage_cheap_tools(Path(tmp) / "cheap-tools"))],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={"PYTHONPATH": str(shadow), "PATH": "/usr/local/bin:/usr/bin:/bin",
                      "HOME": tmp})
             self.assertEqual(res.returncode, 0,
@@ -324,9 +373,11 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
             out = Path(tmp) / "out"
             out.mkdir()
             res = subprocess.run(
-                ["bash", str(GENERATOR), str(out / "pins.yaml")],
+                ["bash", str(GENERATOR), str(out / "pins.yaml"),
+                 # agents-z3cp5: stand-ins for the twelve tools, so this arm costs seconds.
+                 "--lookup-path", str(stage_cheap_tools(Path(tmp) / "cheap-tools"))],
                 # agents-yuk9: the shadow lives HERE, so this arm can actually fail.
-                cwd=tmp, capture_output=True, text=True, timeout=120,
+                cwd=tmp, capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
             self.assertEqual(res.returncode, 0, f"generation must succeed: {res.stderr}")
             hashes = re.findall(r"^\s+sha256: ([0-9a-f]{64})$",
