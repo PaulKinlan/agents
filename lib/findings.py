@@ -2239,9 +2239,40 @@ def repair_missing_candidate_ids_by_location(rows: Any,
         # rule/title has singled a presented candidate out, only a candidate that ALSO matches that identity
         # can be meant instead - otherwise the same ambiguity the narrowing just resolved would reappear one
         # population over, and a pre-pass that recorded the same line twice would stay unbindable.
-        better = [cid for cid, location in elsewhere.items()
-                  if (rank(location, path, line) or 99) <= best_rank
-                  and _shares_narrowing_identity(location, own[target], narrowed_on)]
+        #
+        # BATCHING DECIDES WHAT WAS SHOWN, NOT WHAT EXISTS (agents-3f22c). Two candidates that share a line
+        # can land in DIFFERENT batches - batching splits the candidate list by count, not by location - and
+        # the reported incident is exactly that shape: narrowing ran over the presented slice only, so with
+        # the twin in the sibling batch `narrowed_on` stayed empty, and the guard below then treated that
+        # twin as a possible answer to EVERY row for the line. The station read 32/33 for a line each row's
+        # own `rule_id` had already identified. So a tied unshown candidate is now narrowed against the row's
+        # own identity too: it blocks only when the row cannot tell the two apart, and a row that reads as
+        # the unshown one is refused rather than bound to its neighbour.
+        tie_locations = dict(elsewhere)
+        tie_locations.update(own)
+        better: List[str] = []
+        contradicted: List[Dict[str, Any]] = []
+        split_on: List[str] = []
+        for cid, location in elsewhere.items():
+            if (rank(location, path, line) or 99) > best_rank:
+                continue
+            conflicting_here = _contradicting_identity([target, cid], tie_locations, identity, target)
+            if conflicting_here:
+                contradicted.append({"cid": cid, "fields": conflicting_here})
+                continue
+            remaining, fields = _narrow_shared_location([target, cid], tie_locations, identity)
+            if len(remaining) > 1:
+                better.append(cid)
+                continue
+            split_on.extend(field for field in fields if field not in split_on)
+        if contradicted:
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": (f"row carries no candidate_id and its "
+                                            f"{' and '.join(contradicted[0]['fields'])} names a candidate "
+                                            f"it was NOT shown ({contradicted[0]['cid']}), not the one its "
+                                            f"location does")})
+            continue
         if better:
             if refusals is not None:
                 refusals.append({"cited": None, "path": row.get("path"), "missing": True,
@@ -2256,6 +2287,9 @@ def repair_missing_candidate_ids_by_location(rows: Any,
             continue
         row["candidate_id"] = target
         cited.add(target)
+        # A field that separated the presented candidate from an unshown twin did as much work as one that
+        # narrowed the presented tie, so it is recorded the same way (agents-3f22c).
+        narrowed_on.extend(field for field in split_on if field not in narrowed_on)
         record = {"cited": None, "repaired": target,
                   "rule": "+".join(["path+line" if best_rank == 1 else "path"] + narrowed_on),
                   "path": row.get("path")}
@@ -2352,23 +2386,6 @@ def _identity_reads_as(candidate_value: Any, row_value: str) -> bool:
     starts_a_word = start == 0 or not longer[start - 1].isalnum()
     ends_a_word = end == len(longer) or not longer[end].isalnum()
     return starts_a_word and ends_a_word
-
-
-def _shares_narrowing_identity(location: Dict[str, Any], chosen: Dict[str, Any],
-                              narrowed_on: List[str]) -> bool:
-    """Could a candidate NOT shown to the model be the one a narrowed row meant?
-
-    With no narrowing it always could (the caller's rank test decides), which keeps the pre-existing sibling
-    guard exactly as it was for rows that carry no rule or title. With narrowing, a candidate that matches
-    the chosen one on ANY of the fields that did the narrowing could still be meant - a rule label and a
-    title are independent claims, so the weaker reading (any, not all) is the conservative one.
-    """
-    if not narrowed_on:
-        return True
-    chosen_identity = {field: _normalise_identity_text(chosen.get(field)) for field in narrowed_on}
-    return any(_normalise_identity_text(location.get(field)) == chosen_identity[field]
-               and chosen_identity[field]
-               for field in narrowed_on)
 
 
 COVERAGE_NAMED_UNCITED_IDS = 5   # name a shortfall's candidates, never a wall of 45 of them

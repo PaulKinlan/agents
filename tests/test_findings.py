@@ -2386,6 +2386,53 @@ class TestASharedLocationIsNarrowedByTheRowsOwnRuleOrTitle(unittest.TestCase):
     def cited(self, rows):
         return [row.get("candidate_id") for row in rows]
 
+    def test_two_same_line_candidates_in_DIFFERENT_batches_are_split_by_the_rows_rule(self):
+        """agents-3f22c: the reported shape one population over - batching decides what a call was SHOWN.
+
+        Two rule candidates on one vendored line can land in different batches, so the k4pf1 tie is
+        1-in-batch here: narrowing only the presented slice left `narrowed_on` empty, the sibling guard then
+        treated every same-line candidate the call was not shown as a possible answer, and every row was
+        refused - the station read 32/33 for a line the row's own rule_id had already identified.
+        """
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows, presented=["cccc3333dddd4444"])
+        self.assertEqual(self.cited(rows), ["cccc3333dddd4444"], refusals)
+        self.assertEqual(refusals, [])
+        self.assertEqual(repairs[0]["rule"], "path+line+rule_id",
+                         "the record must name the evidence that separated the two batches")
+
+    def test_a_same_line_sibling_with_the_SAME_rule_still_blocks_across_batches(self):
+        """The other half, unchanged: if the candidate the call was not shown carries the same rule, the row
+        could equally have been about it and no identity the row carries separates them."""
+        locations = dict(self.SHARED)
+        locations["aaaa1111bbbb2222"] = dict(locations["aaaa1111bbbb2222"],
+                                             rule_id="unused-vendor-prefix")
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows, locations=locations, presented=["cccc3333dddd4444"])
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("NOT shown", refusals[0]["reason"])
+        self.assertIn("aaaa1111bbbb2222", refusals[0]["reason"])
+
+    def test_a_row_that_reads_as_the_unshown_sibling_is_refused_not_bound_across_batches(self):
+        """The contradiction rule holds across batches too: a rule naming one candidate and a title naming the
+        one the call was never shown is two answers, and neither is a binding."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix", "title": "Vendor reset contradicts native"}]
+        repairs, refusals = self.repair(rows, presented=["cccc3333dddd4444"])
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]),
+                         "a row that reads as the sibling batch's candidate is not bound to this batch's")
+        self.assertIn("NOT shown", refusals[0]["reason"])
+        self.assertIn("aaaa1111bbbb2222", refusals[0]["reason"])
+
+    def test_a_row_with_no_rule_or_title_is_still_blocked_by_an_unshown_sibling(self):
+        """The guard's original job, which the fix must not weaken: no identity on the row, no binding."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1}]
+        repairs, refusals = self.repair(rows, presented=["cccc3333dddd4444"])
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("NOT shown", refusals[0]["reason"])
+
     def test_the_reported_shape_now_binds_on_the_rows_rule_id(self):
         rows = [{"path": "assets/css/vendor.css", "line_number": 1,
                  "rule_id": "unused-vendor-prefix"}]
