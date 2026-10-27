@@ -444,7 +444,17 @@ _fast_gate_arms_load() {
       *$'\n'"$_new"$'\n'*) echo "fast-gate: FAIL: two arm fragments register the same stage: $_new" >&2; return 1 ;;
     esac
     _seen_stages="$_seen_stages$_new"$'\n'
-    while IFS= read -r _pat; do
+    while IFS= read -r _line; do
+      case "$_line" in
+        *"# no arm in this fragment matched"*) continue ;;          # the loader's own no-match fallback
+        "    "*) _pat="${_line#"    "}" ;;                          # an arm is indented exactly four spaces
+        *) continue ;;
+      esac
+      case "$_pat" in
+        ""|" "*|"#"*|")"*) continue ;;                              # blank, comment, or the fallback itself
+        *")"*) _pat="${_pat%%)*}" ;;                                # the pattern ends at the FIRST ')'
+        *) continue ;;                                              # no ')': not an arm line
+      esac
       [ -n "$_pat" ] || continue
       case "$_seen_patterns" in
         *$'\n'"$_pat"$'\n'*)
@@ -459,7 +469,15 @@ _fast_gate_arms_load() {
     # case where a fallback and an arm share a pattern) and COMMENT lines, which are at the same indent and
     # routinely contain parentheses (a rationale citing its bead). A comment read as a pattern would make
     # the duplicate guard fire on prose.
-    done < <(sed -n '/# no arm in this fragment matched/!s/^    \([^ #)][^)]*\))\s*\(.*\)$/\1/p' "$_frag")
+    # agents-d0yky: this scan used to run `sed` ONCE PER FRAGMENT. Measured on 2026-10-27: 37 fragments,
+    # 37 process spawns, 2.99s of a 7.29s gate startup on a loaded VM (~80ms a spawn under contention). That
+    # startup is paid on EVERY fast gate run and roughly 110 times by tests/test_fast_gate_mapping, which is
+    # the largest single item in the fleet's full-gate cost table (1206.3s standalone). The same scan in the
+    # shell's own reader costs milliseconds and, being a builtin, cannot be starved by the other lanes on
+    # this box. Equivalence with the sed expression is checked fragment by fragment below in this commit's
+    # message: same skip of the loader's own fallback line, same first-character rule, same end at the first
+    # ')'.
+    done < "$_frag"
   done <<< "$FAST_GATE_ARM_FRAGMENTS"
   case "$FAST_GATE_ARM_STAGES" in
     "") echo "fast-gate: FAIL: no arm stages were registered from tools/fast-gate-arms.d/" >&2; return 1 ;;
