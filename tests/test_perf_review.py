@@ -1107,6 +1107,68 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertEqual(violations_after, [])
 
 
+class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
+    """agents-gjm4n / agents-3t9oz: "otherwise" states a CONSEQUENCE at least as often as a fallback.
+
+    Three reviewed patches tried to tell the two apart by what follows the connector (an imperative
+    lexicon, then a concurrency direction, then work dispatched onto a workforce) and each was beaten
+    by a consequence whose subject is a noun that is also a verb ("queue", "pool") next to a
+    concurrency noun ("workers", "worker pool"). The reading that cannot be beaten that way is
+    structural: a connector is a reentrancy fallback only when an IF-reentrant clause precedes it for
+    it to fall back FROM. Where no such clause exists there is nothing to withhold, so the guard
+    keeps every clause inside the precondition it adds (paraphrasing the clause-start connector so
+    the added IF cannot be misread as its antecedent) - no word list decides anything.
+    """
+
+    def finding(self, remediation):
+        return {"rule_id": "tm-pdf-parse-uncancellable", "path": "src/parse.ts",
+                "line_number": 42, "remediation": remediation}
+
+    def test_every_reviewed_consequence_and_the_proposal_after_it_survive(self):
+        # The original bead shape plus each review round's counterexample (agents-3t9oz rounds 1-3).
+        for consequence in (
+            "a slow PDF blocks the queue",
+            "queue starvation blocks the pipeline",
+            "pool workers block the queue",
+            "queue contention on the worker pool blocks throughput",
+        ):
+            with self.subTest(consequence=consequence):
+                report = {"findings": [self.finding(
+                    f"Make the parse cancellable; otherwise {consequence}; "
+                    "prefer a worker pool with per-parse abort.")]}
+                notes = normalize_report(report)
+                remediation = report["findings"][0]["remediation"]
+                self.assertIn(consequence, remediation,
+                              "the causal clause is the reason for the advice, not a fallback")
+                self.assertIn("prefer a worker pool with per-parse abort", remediation,
+                              "the actionable proposal after it is preserved, not silently dropped")
+                self.assertIn("otherwise preserve serial execution", remediation)
+                self.assertFalse(any("withheld" in note for note in notes),
+                                 f"nothing was withheld, so nothing may claim to be: {notes}")
+                self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [],
+                                 "the rewrite must be a report its own validator accepts")
+                self.assertEqual(normalize_report(report), [],
+                                 "a second pass must find nothing to do: the guard writes "
+                                 "what its validator reads")
+                self.assertEqual(report["findings"][0]["remediation"], remediation)
+
+    def test_a_fallback_after_an_if_reentrant_clause_is_still_withheld_and_named(self):
+        # The cut the guard is entitled to make: here an IF-reentrant clause DOES precede the
+        # connector, so what follows it is fallback-branch advice. It is removed, and the note
+        # says how much was removed so a deletion is never silent.
+        report = {"findings": [self.finding(
+            "IF backend is reentrant, use a worker pool; otherwise parallelize operations. "
+            "On failure, preserve serial execution; else preserve serial execution.")]}
+        notes = normalize_report(report)
+        remediation = report["findings"][0]["remediation"]
+        self.assertNotIn("parallelize operations", remediation)
+        self.assertIn("use a worker pool", remediation)
+        self.assertIn("otherwise preserve serial execution", remediation)
+        self.assertTrue(any("withheld" in note and "fallback-only advice" in note for note in notes), notes)
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+
 class TestTheOutputContractAsksForWhatTheSchemaRequires(unittest.TestCase):
     """agents-sz8q: the schema required `snippet` on every finding while this SKILL asked for the other six, so a
     finding written from the SKILL alone was rejected - measured on the gendn run as exactly 35 violations for 35
