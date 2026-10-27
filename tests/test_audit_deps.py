@@ -617,6 +617,34 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
                 [c.get("rule_id") for c in candidates],
             )
 
+    def test_pip_audit_parseable_but_wrong_shape_emits_coverage_gap(self):
+        # agents-b9rg0: the sibling of the unparseable case. pip-audit can exit 0 with valid JSON
+        # that is NOT its schema - an index or proxy answering {"detail": "rate limited"}, a bare
+        # {} - and the None check let that through, iterated no dependencies and reported a clean
+        # Python scan with zero coverage. The npm path already guards the shape
+        # (audit_deps.py: `"vulnerabilities" not in raw_audit`); this asserts the pip path does too.
+        for body in ('{"detail": "rate limited"}', "{}", "[]", "null", '[{"id": "x"}]'):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+                def wrong_shape_run(cmd, **kwargs):
+                    return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+
+                real_which = shutil.which
+
+                def fake_which(name, *args, **kwargs):
+                    return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
+
+                with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+                     mock.patch.object(audit_deps.subprocess, "run", side_effect=wrong_shape_run):
+                    candidates, _ = audit_deps.audit_python(repo)
+                self.assertIn(
+                    "pip-audit-unavailable",
+                    [c.get("rule_id") for c in candidates],
+                    f"parseable JSON without the pip-audit schema is not a result: {body}",
+                )
+
     def test_pip_audit_success_emits_no_coverage_gap(self):
         # The gap candidate must not fire when pip-audit answered with usable JSON.
         with tempfile.TemporaryDirectory() as tmp:
