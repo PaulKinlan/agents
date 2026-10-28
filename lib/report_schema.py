@@ -403,10 +403,13 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
 # descriptive "queries run in parallel" prose. Keep the execution pattern as the second
 # check so unrelated imperatives do not trigger the reentrancy guard.
 _DESCRIPTION_ADVICE_CLAUSE = re.compile(
-    r"(?:^|[.;!?]\s*)(?:(?:fix|solution|recommendation|suggestion|proposal)\s*:\s*)?"
+    r"(?:^|[.;!?]\s*)(?:(?:fix|solve|address|remedy)\s+by\s+"
+    r"(?:using|running|starting|executing|issuing|sending|dispatching|awaiting|"
+    r"calling|replacing|switching|making|parallelizing|batching|overlapping|scheduling)"
+    r"|(?:(?:fix|solution|recommendation|suggestion|proposal)\s*:\s*)?"
     r"(?:please\s+|you\s+should\s+|should\s+)?"
     r"(?:use|run|start|execute|issue|send|dispatch|await|call|replace|switch|make|"
-    r"parallelize|batch|overlap|schedule)\b(?:[^.;\n]|\.(?!\s|$))*",
+    r"parallelize|batch|overlap|schedule))\b(?:[^.;\n]|\.(?!\s|$))*",
     re.IGNORECASE | re.MULTILINE,
 )
 

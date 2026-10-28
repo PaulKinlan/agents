@@ -286,7 +286,12 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertEqual(unpreconditioned_concurrency_findings(report), [])
         self.assertIn("Precondition: Verify backend reentrancy", proposed["remediation"])
 
-        for advice in ("Fix: use Promise.all for DNS requests", "Run asyncio.gather on background tasks"):
+        for advice in (
+            "Fix: use Promise.all for DNS requests",
+            "Run asyncio.gather on background tasks",
+            "Fix by using Promise.all for DNS requests",
+            "Solve by running asyncio.gather on background tasks",
+        ):
             with self.subTest(description_advice=advice):
                 described_proposal = dict(finding, description=advice,
                                           remediation="Reject partial answers and return SERVFAIL.")
@@ -300,6 +305,10 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     ROOT / "agents" / "vuln-triage",
                     {"output": {"schema": "report.schema.json"}}, report,
                 ), [])
+
+        gerund_context = dict(finding, description="Using parallel DNS queries can be hazardous.",
+                              remediation="Reject partial answers and return SERVFAIL.")
+        self.assertEqual(normalize_report({"summary": "DNS hazard", "findings": [gerund_context]}), [])
 
     def test_dismissed_waterfall_does_not_require_concurrency_precondition(self):
         """Dismissals and explicit serial advice are not concurrency recommendations."""
