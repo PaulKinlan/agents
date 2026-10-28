@@ -21,7 +21,10 @@
 #
 # Wiring (per-VM ~/.fleet/check.conf, alongside the full-gate CHECK_CMD):
 #   CHECK_FAST_CMD="bash tools/fast-gate.sh"
-#   CHECK_FAST_TIMEOUT=180
+#   CHECK_FAST_TIMEOUT=2400   (agents-vgx2m: this example said 180, three bounds out of date after
+#                              agents-g4cq9 - a manual install from this comment would have
+#                              recreated the timeout that reddened the gate. Keep it equal to
+#                              tools/check.conf: tests/test_check_conf_consistency.py pins the pair.)
 set -euo pipefail
 
 # WHICH ENVIRONMENT THIS VERDICT IS ABOUT (agents-u4k7). Printed on STDERR, not stdout: the fast
