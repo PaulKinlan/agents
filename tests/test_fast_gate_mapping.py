@@ -803,6 +803,28 @@ class TestFastGateMapping(unittest.TestCase):
                 resolve_path_status(p)
             self.assertNotIsInstance(cm_partial.exception, UnmappedPathError)
 
+    def test_inventory_mapping_cache_hits_start_no_gate_processes(self):
+        """agents-65yxo: pin cache HITS, not just their equivalent mapping answers.
+
+        Without this process-count assertion, deleting either cached helper branch leaves all
+        mapping assertions green while restoring a separate gate startup for every path.
+        Count startups rather than wall time, which depends on host contention. The batch
+        fixture has already populated these records before any test method runs.
+        """
+        self.assertTrue(_PROBE_INVENTORY, "an empty inventory cannot prove cache hits")
+        self.assertTrue(_PATH_RECORDS, "the batched setup must populate mapping records")
+        self.assertFalse(set(_PROBE_INVENTORY) - _PATH_RECORDS.keys(),
+                         "literal probes must be included in the batched cache")
+        real_run = subprocess.run
+        with mock.patch.object(subprocess, "run", wraps=real_run) as gate_run:
+            for path, (status, suites) in _PATH_RECORDS.items():
+                with self.subTest(path=path):
+                    self.assertEqual(resolve_path_status(path), (status, suites))
+                    expected = sorted(set(suites) | _ALWAYS_SUITES) if status == "mapped" else []
+                    self.assertEqual(resolve_fast_gate([path]), expected)
+                    self.assertEqual(gate_run.call_count, 0,
+                                     f"{path}: cached mapping paid {gate_run.call_count} gate startup(s)")
+
     def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
         """A change with NO patches/ involvement selects exactly what it selected before
         (agents-pgv9): the new arm is confined to patches/*.patch paths, so it cannot slow or widen any
