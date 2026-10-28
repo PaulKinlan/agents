@@ -65,6 +65,19 @@ _GATE_CLI_GUARD_S = 210
 # the guard below fails with the measurement in the message rather than with an opinion.
 _WORST_MEASURED_GATE_CLI_S = 50.6
 
+# Bound for this file's LOCAL GIT plumbing (agents-5bpe4): fixture init/add on temp trees and the
+# `git ls-files` reads at the repo root - all sub-0.1s here (worst measured: git ls-files tests,
+# 0.095s cold on this VM). 60s is a hang guard at >600x that measurement, deliberately FAR below
+# _GATE_CLI_GUARD_S: a wedged fixture git must not spend the gate CLI's budget, and a legitimate
+# bound on a local call must never be forced onto the gate constant - the guard's old false-red
+# (agents-5bpe4): its rule said "every bound must use _GATE_CLI_GUARD_S", so bounding a local git
+# call at its own class meant tripping the guard, and the only escape was deleting it.
+_LOCAL_GIT_GUARD_S = 60
+
+# The worst standalone measurement behind _LOCAL_GIT_GUARD_S (see above), kept as its own number so
+# the headroom pin below fails with the measurement in the message rather than with an opinion.
+_WORST_MEASURED_LOCAL_GIT_S = 0.095
+
 
 # ---------------------------------------------------------------------------------------------------
 # agents-pdth: THE GENERAL FAST-GATE COVERAGE PROPERTY
@@ -341,7 +354,7 @@ def _tracked_test_files(root=None):
     root = root or ROOT
     out = subprocess.run(
         ["git", "-C", str(root), "ls-files", "tests"],
-        capture_output=True, text=True, check=True
+        capture_output=True, text=True, check=True, timeout=_LOCAL_GIT_GUARD_S
     ).stdout.splitlines()
     paths = sorted(root / p for p in out if p.endswith(".py"))
     if not paths:
@@ -505,17 +518,17 @@ class TestAllowlistFragmentsAreConfigurationFromTheTree(unittest.TestCase):
         tracked = fragments / "consumer_coverage.json"
         tracked.write_text(self.VALID + "\n", encoding="utf-8")
         subprocess.run(["git", "-c", "init.defaultBranch=main", "init", "-q", str(root)],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, timeout=_LOCAL_GIT_GUARD_S)
         subprocess.run(["git", "-C", str(root), "add", "--",
                         "tests/fast_gate_allowlists.d/consumer_coverage.json"],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, timeout=_LOCAL_GIT_GUARD_S)
         return fragments, tracked
 
     def _tracked_fragment_names(self, root=ROOT):
         """The tracked .json fragments, read independently of the loader (a direct git call)."""
         listed = subprocess.run(
             ["git", "-C", str(root), "ls-files", "tests/fast_gate_allowlists.d"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=_LOCAL_GIT_GUARD_S,
         ).stdout.splitlines()
         return sorted(Path(name).name for name in listed if name.endswith(".json"))
 
@@ -683,8 +696,8 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
                 encoding="utf-8",
             )
             (fake / "lib" / "orphan.py").write_text("def orphan():\n    return 2\n", encoding="utf-8")
-            subprocess.run(["git", "init", "-q"], cwd=fake, check=True)
-            subprocess.run(["git", "add", "."], cwd=fake, check=True)
+            subprocess.run(["git", "init", "-q"], cwd=fake, check=True, timeout=_LOCAL_GIT_GUARD_S)
+            subprocess.run(["git", "add", "."], cwd=fake, check=True, timeout=_LOCAL_GIT_GUARD_S)
             # KNOWN BAD: widget.py has a consumer, so the consumer set is non-empty. The probe does not
             # ask the gate (there is no gate in a temp tree); it asserts the ORACLE SEES the reference.
             self.assertEqual(
@@ -738,9 +751,10 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
             arms = root / "tools" / "fast-gate-arms.d"
             arms.mkdir(parents=True)
             (arms / "010-tracked.sh").write_text("case TRACKED_FRAGMENT in\n", encoding="utf-8")
-            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "init", "-q", str(root)], check=True, timeout=_LOCAL_GIT_GUARD_S)
             subprocess.run(
-                ["git", "-C", str(root), "add", "tools/fast-gate-arms.d/010-tracked.sh"], check=True
+                ["git", "-C", str(root), "add", "tools/fast-gate-arms.d/010-tracked.sh"],
+                check=True, timeout=_LOCAL_GIT_GUARD_S,
             )
             self.assertIn(
                 "TRACKED_FRAGMENT", _arm_registry_text(root),
@@ -938,7 +952,9 @@ class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
 
 
 class TestGateCliTimeoutPolicy(unittest.TestCase):
-    """Bounds on the gate's own subprocess calls are sized from measurement, once (agents-4jqna).
+    """Bounds on this file's subprocess calls are sized from measurement, once PER CALL CLASS
+    (agents-4jqna, agents-5bpe4): _GATE_CLI_GUARD_S for tools/fast-gate.sh invocations,
+    _LOCAL_GIT_GUARD_S for local git plumbing.
 
     The third instance of the same drift in one week, after the beads-sink bound (agents-0qyjo) and
     CHECK_FAST_TIMEOUT: a literal per-call bound sized on a quiet box reddens a healthy gate under
@@ -946,26 +962,71 @@ class TestGateCliTimeoutPolicy(unittest.TestCase):
     reddens on itself."""
 
     def test_no_literal_timeout_remains_in_this_file(self):
-        """A reintroduced literal is how a file ends up with several bounds for the same CLI."""
+        """A reintroduced literal is how a file ends up with several bounds for the same CLI.
+
+        The contract (agents-5bpe4): NO bare numeric timeout literal may appear in a code line;
+        every subprocess bound references a module-level named constant, one per call class -
+        _GATE_CLI_GUARD_S for tools/fast-gate.sh invocations, _LOCAL_GIT_GUARD_S for local git
+        plumbing. The scan is whitespace-tolerant ('timeout = NN' is the same literal as the
+        no-space spelling; agents-aau00 landed that widening for tests/test_sinks.py) and it
+        covers the dict-spread spelling too (a quoted 'timeout' KEY carrying a numeric value),
+        which the bare-kwarg pattern missed entirely. Both were reviewer-measured mutants that
+        the old scan silently passed - a guard that misses its mutant is no guard at all.
+        """
         source = (ROOT / "tests" / "test_fast_gate_consumer_coverage.py").read_text(encoding="utf-8")
         # COUNT CODE, NOT PROSE (the agents-kevst lesson): only full-line comments are dropped, so a
-        # literal quoted in a TRAILING comment still trips the scan. The pattern is [0-9.]+ rather
-        # than integer-only: a float literal is the same drift with different punctuation.
+        # literal quoted in a TRAILING comment or in a docstring still trips the scan. The pattern is
+        # [0-9.]+ rather than integer-only: a float literal is the same drift with different
+        # punctuation. Neither pattern matches its own source line: after the word 'timeout' the
+        # kwarg pattern's source has a backslash (not whitespace-then-'='), and the dict pattern's
+        # source has a bracket (not a quote) - verified against the reviewer's REPRO mutants.
         code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
-        literals = re.findall(r"timeout=([0-9.]+)", code)
+        literals = re.findall(r"timeout\s*=\s*([0-9.]+)", code)
+        literals += re.findall(r"[\"']timeout[\"']\s*:\s*([0-9.]+)", code)
         self.assertEqual(
             literals, [],
-            "every subprocess bound in this file must use _GATE_CLI_GUARD_S; found literal timeout(s) "
-            f"{literals} - re-inlining one is how three call sites for the SAME gate invocation ended "
-            "up sharing one quiet-box opinion (agents-4jqna)")
+            "every subprocess bound in this file must reference a named constant - "
+            "_GATE_CLI_GUARD_S for tools/fast-gate.sh invocations, _LOCAL_GIT_GUARD_S for local "
+            f"git plumbing; found bare literal timeout(s) {literals}. Re-inlining one is how three "
+            "call sites for the SAME gate invocation ended up sharing one quiet-box opinion "
+            "(agents-4jqna), and a literal on a local git call would be sized by the wrong class "
+            "entirely (agents-5bpe4)")
 
     def test_the_guard_still_covers_the_worst_measured_run(self):
-        """Not a number chosen for looks: it is a multiple of a measurement, and the message says which."""
+        """Not a number chosen for looks: it is a multiple of a measurement, and the message says which.
+
+        And it has a CEILING (agents-5bpe4): the lower pin alone let the bound creep - a future
+        edit could declare 1200 (half the tracked fast-gate budget) and still pass 'at least 3x'.
+        One gate invocation may not eat more than a quarter of the whole gate's budget:
+        CHECK_FAST_TIMEOUT is 2400s (docs/speed.md), so the ceiling is 600s.
+        """
         self.assertGreaterEqual(
             _GATE_CLI_GUARD_S, 3 * _WORST_MEASURED_GATE_CLI_S,
             f"_GATE_CLI_GUARD_S={_GATE_CLI_GUARD_S} has less than 3x headroom over the worst measured "
             f"batch-resolve run ({_WORST_MEASURED_GATE_CLI_S}s at load 6.37); the gate reddens on a "
             "busy box long before a real hang, which is what agents-4jqna was")
+        self.assertLessEqual(
+            _GATE_CLI_GUARD_S, 600,
+            f"_GATE_CLI_GUARD_S={_GATE_CLI_GUARD_S} exceeds a quarter of the tracked fast-gate budget "
+            "(CHECK_FAST_TIMEOUT=2400s, docs/speed.md): one wedged gate CLI could then eat the whole "
+            "gate's budget (agents-5bpe4). If a measurement genuinely demands more, the fix is the "
+            "gate's startup cost (agents-kw7wl), not this bound.")
+
+    def test_the_local_git_bound_is_its_own_class(self):
+        """agents-5bpe4: the local-git guard is sized from its OWN measurement and stays far below
+        the gate CLI's bound - the two classes must not converge, or bounding a local call would
+        again mean borrowing the gate's number (the old false-red), and a wedged fixture git would
+        be indistinguishable in cost from a wedged gate CLI."""
+        self.assertGreaterEqual(
+            _LOCAL_GIT_GUARD_S, 3 * _WORST_MEASURED_LOCAL_GIT_S,
+            f"_LOCAL_GIT_GUARD_S={_LOCAL_GIT_GUARD_S} has less than 3x headroom over the worst "
+            f"measured local git call ({_WORST_MEASURED_LOCAL_GIT_S}s: git ls-files tests, cold, "
+            "this VM)")
+        self.assertLess(
+            _LOCAL_GIT_GUARD_S, _GATE_CLI_GUARD_S,
+            f"_LOCAL_GIT_GUARD_S={_LOCAL_GIT_GUARD_S} must stay below "
+            f"_GATE_CLI_GUARD_S={_GATE_CLI_GUARD_S}: local git plumbing is sub-0.1s work and must "
+            "never be sized by the gate CLI's O(startup) measurement (agents-5bpe4)")
 
 
 def tearDownModule():
