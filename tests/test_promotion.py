@@ -37,6 +37,22 @@ _CLI_GUARD_S = 120
 # fails with the measurement in the message rather than with an opinion.
 _WORST_MEASURED_CLI_S = 28.0
 
+# The concurrent-promotions test needs two more numbers (agents-inbfi), both derived from
+# _CLI_GUARD_S rather than invented:
+# - The lock wait. promote_issue holds the findings-store lock across its WHOLE run
+#   (lib/sinks/github.py: the `with FindingsStore(...)` wraps the stub gh/bd calls too), so a
+#   sibling's lock hold cannot exceed one promote run - and _CLI_GUARD_S is already this file's
+#   bound for one run at 4x the worst measurement. flock also dies with its process, so the
+#   test's finally-kill releases it. The product default (10s, lib/findings.py) stays untouched:
+#   fail-fast-and-retry is right in production, but a test that DELIBERATELY races two writers
+#   must turn the documented knob, or gate load outwaits the default (measured: StoreBusyError,
+#   rc=2, on a comments-only delta).
+# - The pair bound. A waiter's worst case is the lock wait (_CLI_GUARD_S) plus its own run
+#   (4x the 28.0s measurement = 112s): 2 x _CLI_GUARD_S = 240s covers 232s with room, instead
+#   of the single-digit-percent-headroom arithmetic this file exists to prevent.
+_STORE_LOCK_WAIT_S = _CLI_GUARD_S
+_CONCURRENT_GUARD_S = 2 * _CLI_GUARD_S
+
 
 class TestPromotion(SinkFixture, unittest.TestCase):
     def setUp(self):
@@ -241,13 +257,14 @@ class TestPromotion(SinkFixture, unittest.TestCase):
         cmd = [sys.executable, str(self.cli), "--target", "fixture", "--target-dir",
                str(self.target), "--visibility", "public", "--repo", REPO,
                "--beads-dir", str(self.target), "--promote-issue", self.issue_url]
-        env = dict(self.env, SINK_ALLOW_BD="1")
+        env = dict(self.env, SINK_ALLOW_BD="1",
+                   FACTORY_STORE_LOCK_TIMEOUT=str(_STORE_LOCK_WAIT_S))
         procs = [subprocess.Popen(cmd, cwd=self.factory, env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                  for _ in range(2)]
         try:
             for proc in procs:
-                out, err = proc.communicate(timeout=_CLI_GUARD_S)
+                out, err = proc.communicate(timeout=_CONCURRENT_GUARD_S)
                 self.assertEqual(proc.returncode, 0, out + err)
         finally:
             for proc in procs:
