@@ -253,6 +253,39 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(is_concurrency_recommendation(f10))
 
+    def test_existing_parallel_dns_queries_do_not_become_a_concurrency_proposal(self):
+        """agents-f4wa5: context about concurrent DNS work is not advice to add concurrency."""
+        for remediation in (
+            "Reject partial answers and return SERVFAIL.",
+            "Run requests sequentially and reject partial answers.",
+        ):
+            with self.subTest(remediation=remediation):
+                finding = {
+                    "rule_id": "tm-dns-partial-answer-failopen", "path": "src/resolver.ts",
+                    "line_number": 42, "severity": "high",
+                    "title": "DNS resolver accepts a partial answer",
+                    "description": "Upstream A/AAAA queries run in parallel; the first reply wins.",
+                    "remediation": remediation,
+                }
+                report = {"summary": "DNS fail-open", "findings": [finding]}
+                if remediation.startswith("Reject"):
+                    self.assertTrue(is_concurrency_recommendation(finding),
+                                    "the descriptive signal is present; it must not become a proposal")
+                self.assertEqual(normalize_report(report), [])
+                self.assertEqual(finding["remediation"], remediation)
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+                self.assertEqual(validate_agent_report(
+                    ROOT / "agents" / "vuln-triage",
+                    {"output": {"schema": "report.schema.json"}}, report,
+                ), [])
+
+        # A security finding that actually proposes parallel execution still needs the guard.
+        proposed = dict(finding, remediation="Use concurrent queries on the shared resolver")
+        report = {"summary": "DNS proposal", "findings": [proposed]}
+        self.assertIsNotNone(guard_concurrency_finding(proposed, 0))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+        self.assertIn("Precondition: Verify backend reentrancy", proposed["remediation"])
+
     def test_dismissed_waterfall_does_not_require_concurrency_precondition(self):
         """Dismissals and explicit serial advice are not concurrency recommendations."""
         for dismissal in (

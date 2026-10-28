@@ -398,6 +398,22 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
+def _proposes_execution_concurrency(finding: Dict[str, Any]) -> bool:
+    """Guard proposed changes, not background concurrency described by a finding.
+
+    Title/description may describe existing parallel DNS queries or a vulnerability. Only a
+    remediation or added patch line can propose execution concurrency that needs a reentrancy
+    precondition. Keep the public classifier's description fallback for callers that inspect
+    concurrency topics, but never turn that fallback alone into a report rejection.
+    """
+    if not isinstance(finding, dict):
+        return False
+    return is_concurrency_recommendation({
+        key: finding[key] for key in ("rule_id", "false_positive", "remediation", "proposed_fix_diff")
+        if key in finding
+    })
+
+
 # Domains and primitives where concurrency is often non-reentrant or stateful
 _NON_REENTRANT_SUSPECT_PATTERN = re.compile(
     r"\b(?:onnx|sessions?|models?|inferences?|forward\s+passes?|wasm|webassembly|gpus?|webgpu|webgl|transactions?|mutex(?:es)?|locks?|db|databases?|sqlite)\b",
@@ -661,7 +677,7 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
        apply concurrency patches (Promise.all / asyncio.gather) without verified runtime
        reentrancy and binding proof in the target codebase (agents-vorw / hub fleet-4inv).
     """
-    if not is_concurrency_recommendation(finding):
+    if not _proposes_execution_concurrency(finding):
         return None
 
     modified = False
@@ -741,7 +757,7 @@ def unpreconditioned_concurrency_findings(report: Any) -> List[str]:
     for i, item in enumerate(report["findings"]):
         if not isinstance(item, dict):
             continue
-        if is_concurrency_recommendation(item):
+        if _proposes_execution_concurrency(item):
             if not has_reentrancy_precondition(item):
                 violations.append(
                     f"$.findings[{i}]: concurrency recommendation (rule {item.get('rule_id', 'unknown')!r}) "
