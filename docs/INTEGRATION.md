@@ -386,6 +386,11 @@ Install background daemons that run automatically under your local developer ses
 ./factory schedule list
 ```
 
+Generated systemd units are validated structurally on every generation; the external
+`systemd-analyze verify` pass is best-effort (a timeout under host load downgrades to a
+warning). Set `FACTORY_SKIP_SYSTEMD_ANALYZE=1` to skip that external pass entirely on hosts
+where the tool is wedged.
+
 ---
 
 ## 4. Interactive Skills Plane (Local Agent Tools)

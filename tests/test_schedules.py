@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Unit and integration tests for Software Factory launchd and systemd schedule generation."""
 
+import contextlib
+import io
 import os
 import plistlib
 import shutil
@@ -25,6 +27,28 @@ from lib.scheduler import (
     validate_plist,
     validate_systemd_units,
 )
+
+# Bound for the dedicated real-tool tests. systemd-analyze normally verifies in well under a
+# second, but pages in units from the whole filesystem and stalls intermittently when the host
+# is loaded (agents-vqnfo). Past this bound the real-tool tests skip rather than redden.
+REAL_VERIFY_TIMEOUT_SECONDS = 120
+
+_ORIGINAL_SKIP_ANALYZE = os.environ.get("FACTORY_SKIP_SYSTEMD_ANALYZE")
+
+
+def setUpModule():
+    # Unit tests assert the GENERATED TEXT and must not depend on a live systemd-analyze
+    # under gate load (agents-vqnfo). Structural validation still runs everywhere; the
+    # dedicated real-tool tests invoke systemd-analyze directly with their own bound.
+    # Subprocess CLI tests inherit this via os.environ.
+    os.environ["FACTORY_SKIP_SYSTEMD_ANALYZE"] = "1"
+
+
+def tearDownModule():
+    if _ORIGINAL_SKIP_ANALYZE is None:
+        os.environ.pop("FACTORY_SKIP_SYSTEMD_ANALYZE", None)
+    else:
+        os.environ["FACTORY_SKIP_SYSTEMD_ANALYZE"] = _ORIGINAL_SKIP_ANALYZE
 
 
 class TestScheduleGeneration(unittest.TestCase):
@@ -164,12 +188,16 @@ class TestScheduleGeneration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
             s_path, t_path = generate_systemd_units("voicebox", "secret-scan", cadence={"hour": 7, "minute": 30}, output_dir=out_dir)
-            res = subprocess.run(
-                ["systemd-analyze", "verify", str(s_path), str(t_path)],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            try:
+                res = subprocess.run(
+                    ["systemd-analyze", "verify", str(s_path), str(t_path)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=REAL_VERIFY_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired:
+                self.skipTest(f"systemd-analyze verify exceeded {REAL_VERIFY_TIMEOUT_SECONDS}s under host load")
             self.assertEqual(res.returncode, 0, f"systemd-analyze verify failed: {res.stderr}")
 
     def test_install_and_uninstall_launchd_isolated(self):
@@ -267,12 +295,16 @@ class TestScheduleGeneration(unittest.TestCase):
             self.assertIn(f'StandardOutput=append:{escaped_root}/runs/', service_txt)
 
             if shutil.which("systemd-analyze"):
-                res = subprocess.run(
-                    ["systemd-analyze", "verify", str(service_path), str(timer_path)],
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
+                try:
+                    res = subprocess.run(
+                        ["systemd-analyze", "verify", str(service_path), str(timer_path)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=REAL_VERIFY_TIMEOUT_SECONDS
+                    )
+                except subprocess.TimeoutExpired:
+                    self.skipTest(f"systemd-analyze verify exceeded {REAL_VERIFY_TIMEOUT_SECONDS}s under host load")
                 self.assertEqual(res.returncode, 0, f"systemd-analyze verify failed on spaced path: {res.stderr}")
 
     def test_manager_commands_handle_failure_nonzero_and_preserve_files(self):
@@ -599,6 +631,76 @@ class TestScheduleGeneration(unittest.TestCase):
             )
             self.assertNotEqual(res_launch.returncode, 0)
             self.assertEqual(dest_plist.read_text(encoding="utf-8"), "PRE_EXISTING_PLIST_CONTENT")
+
+
+class TestSystemdAnalyzerSeam(unittest.TestCase):
+    """agents-vqnfo: external `systemd-analyze verify` is best-effort and skippable.
+
+    The structural checks in validate_systemd_units are the contract; the live tool can
+    stall under host load, so a kill switch exists for tests/operators and a timeout
+    downgrades to a warning instead of refusing structurally valid units.
+    """
+
+    def _valid_units(self, tmpdir):
+        return generate_systemd_units(
+            "voicebox", "secret-scan", cadence={"interval": 3600}, output_dir=Path(tmpdir)
+        )
+
+    def test_kill_switch_skips_external_verify(self):
+        from lib import scheduler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s_path, t_path = self._valid_units(tmpdir)
+            with mock.patch.dict(os.environ, {"FACTORY_SKIP_SYSTEMD_ANALYZE": "1"}), \
+                 mock.patch.object(scheduler, "_run_control",
+                                   side_effect=AssertionError("control call despite kill switch")):
+                self.assertIsNone(scheduler._find_systemd_analyze())
+                service_txt, timer_txt = validate_systemd_units(s_path, t_path)
+            self.assertIn("[Service]", service_txt)
+            self.assertIn("[Timer]", timer_txt)
+
+    def test_find_systemd_analyze_honours_env_and_path(self):
+        from lib import scheduler
+
+        env_without = {k: v for k, v in os.environ.items() if k != "FACTORY_SKIP_SYSTEMD_ANALYZE"}
+        with mock.patch.dict(os.environ, env_without, clear=True), \
+             mock.patch.object(scheduler.shutil, "which", return_value="/usr/bin/systemd-analyze"):
+            self.assertEqual(scheduler._find_systemd_analyze(), "/usr/bin/systemd-analyze")
+        with mock.patch.dict(os.environ, dict(env_without, FACTORY_SKIP_SYSTEMD_ANALYZE="1"), clear=True), \
+             mock.patch.object(scheduler.shutil, "which",
+                               side_effect=AssertionError("which consulted despite kill switch")):
+            self.assertIsNone(scheduler._find_systemd_analyze())
+
+    def test_external_verify_timeout_warns_and_succeeds(self):
+        from lib import scheduler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s_path, t_path = self._valid_units(tmpdir)
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, {"FACTORY_SKIP_SYSTEMD_ANALYZE": ""}), \
+                 mock.patch.object(scheduler.shutil, "which", return_value="/usr/bin/systemd-analyze"), \
+                 mock.patch.object(scheduler, "_run_control",
+                                   side_effect=subprocess.TimeoutExpired(cmd="systemd-analyze verify", timeout=30)), \
+                 contextlib.redirect_stderr(stderr):
+                service_txt, timer_txt = validate_systemd_units(s_path, t_path)
+            self.assertIn("[Service]", service_txt)
+            self.assertIn("[Timer]", timer_txt)
+            self.assertIn("timed out", stderr.getvalue())
+
+    def test_external_verify_failure_still_raises(self):
+        from lib import scheduler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s_path, t_path = self._valid_units(tmpdir)
+            failed = subprocess.CompletedProcess(
+                args=["systemd-analyze", "verify"], returncode=1, stdout="", stderr="Unknown section 'Bogus'"
+            )
+            with mock.patch.dict(os.environ, {"FACTORY_SKIP_SYSTEMD_ANALYZE": ""}), \
+                 mock.patch.object(scheduler.shutil, "which", return_value="/usr/bin/systemd-analyze"), \
+                 mock.patch.object(scheduler, "_run_control", return_value=failed):
+                with self.assertRaises(ValueError) as ctx:
+                    validate_systemd_units(s_path, t_path)
+            self.assertIn("systemd-analyze verify failed", str(ctx.exception))
 
 
 class TestControlPlaneTimeouts(unittest.TestCase):
