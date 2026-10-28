@@ -630,6 +630,28 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self.assertLessEqual(factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS, 30)
         self.assertLessEqual(factory_cli.GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS, 10)
 
+    def test_cleanup_removes_a_locked_partial_worktree_registration(self):
+        """agents-nf54e review P2: prune skips locked admin state after a timed-out add."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        for missing_directory in (False, True):
+            with self.subTest(missing_directory=missing_directory):
+                worktree = self.tmp / f"partial-locked-worktree-{missing_directory}"
+                factory_cli._create_session_worktree(target, worktree)
+                subprocess.run(["git", "worktree", "lock", str(worktree)], cwd=target,
+                               check=True, capture_output=True, text=True)
+                if missing_directory:
+                    shutil.rmtree(worktree)  # a timed-out checkout may leave admin state only
+                one_force = subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
+                                           cwd=target, capture_output=True, text=True)
+                self.assertNotEqual(one_force.returncode, 0,
+                                    "the fixture must reproduce the single-force cleanup failure")
+                factory_cli._remove_session_worktree(target, worktree)
+                self.assertFalse(worktree.exists())
+                registered = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=target,
+                                            check=True, capture_output=True, text=True).stdout
+                self.assertNotIn(str(worktree), registered,
+                                 "cleanup must remove locked admin registration, not just the directory")
+
     def test_worktree_cleanup_caps_both_git_commands_after_timeout(self):
         """A partial checkout must not turn best-effort cleanup into two 120s waits."""
         target = self._git_target({"index.html": BLOCKING_HTML})

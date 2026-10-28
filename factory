@@ -601,7 +601,10 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
     .git marker; if the git remove still fails, the directory is deleted directly (it is under
     the run dir) and pruned, so no leak survives."""
     try:
-        res = _run_git(["worktree", "remove", "--force", str(worktree_dir)], target_dir,
+        # Git requires --force twice for a locked worktree. A timed-out add can leave a
+        # partial registration with a lock; one --force fails and prune skips it.
+        # This path is the unique disposable run-dir worktree, never the target checkout.
+        res = _run_git(["worktree", "remove", "--force", "--force", str(worktree_dir)], target_dir,
                        timeout_seconds=GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS)
         if res.returncode != 0:
             sys.stderr.write(
