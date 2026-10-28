@@ -36,10 +36,42 @@ SECURITY_KEYWORDS = [
     "boundary", "origin", "cors", "credential", "taint", "sandbox"
 ]
 
+# ONE regex per category, deliberately: scan_entry_points builds matched_categories by iterating
+# these pairs, so a second pair reusing a category would emit a duplicate finding for any line
+# both regexes match. New shapes go INTO the category's existing alternation (agents-ombm8).
+#
+# Python shapes were added by agents-ombm8 (nightly audit: the inventory was JS/TS-only, so a
+# Python target's listeners and spawns came back EMPTY and the threat model was written from
+# silence). Residual, deliberate gaps - the scanner trades recall for precision (agents-55r):
+# - Django urls.py `path("x", view)` / `re_path(...)`: the function names are too generic to match
+#   bare; Django endpoints reach the inventory via their view decorators instead.
+# - Go listeners/spawns (`http.HandleFunc(`, `exec.Command(`) are still blind - same defect class,
+#   filed separately rather than widening this change.
 ENTRY_POINT_PATTERNS = [
-    ("server-listener", re.compile(r"""\b(?:app\.(?:get|post|put|delete|use)|createServer|new WebSocketServer)\s*\(""")),
+    # JS/TS listeners plus Python ones: WSGI/ASGI route decorators (@app.route, @router.get,
+    # @bp.post, ...), stdlib servers (HTTPServer, socketserver's TCPServer family, wsgiref's
+    # make_server), and server runners (uvicorn.run, hypercorn.run, daphne.run, aiohttp's
+    # run_app, Flask's app.run). The decorator branch excludes unittest.mock receivers:
+    # `@mock.patch("os.system")` is a test double, not an HTTP PATCH route, and production
+    # modules do carry decorators like it.
+    ("server-listener", re.compile(
+        r"""\b(?:app\.(?:get|post|put|delete|use|run)|createServer|new WebSocketServer"""
+        r"""|(?:Threading)?HTTPServer|(?:Threading|Forking)?(?:TCP|UDP|UnixStream|UnixDatagram)Server"""
+        r"""|socketserver\.\w+Server|make_server|run_app"""
+        r"""|(?:uvicorn|hypercorn|daphne)\.run)\s*\("""
+        r"""|^\s*@(?!(?:unittest\.)?mock\.)[\w.]+\.(?:route|api_route|get|post|put|delete|patch"""
+        r"""|head|options|websocket)\s*\("""
+    )),
     ("extension-messaging", re.compile(r"""chrome\.runtime\.(?:onMessage|onConnect(?:External)?)\.addListener""")),
-    ("code-execution", re.compile(r"""\b(?:child_process|spawn|exec|execSync|execFile|eval|new Function)\s*\(""")),
+    # JS/TS execution sinks plus Python spawns: subprocess.*, os.system/popen/exec*/spawn*/
+    # posix_spawn, and asyncio.create_subprocess_shell/exec. Bare `spawn(`/`exec(`/`eval(` were
+    # already language-agnostic; `os.execv(` was NOT (bare `exec` requires the paren immediately).
+    ("code-execution", re.compile(
+        r"""\b(?:child_process|spawn|exec|execSync|execFile|eval|new Function"""
+        r"""|subprocess\.(?:run|call|check_call|check_output|Popen|getstatusoutput)"""
+        r"""|os\.(?:system|popen|exec\w+|spawn\w+|posix_spawn)"""
+        r"""|create_subprocess_(?:shell|exec))\s*\("""
+    )),
     ("dom-injection", re.compile(r"""\b(?:innerHTML|outerHTML|document\.write|insertAdjacentHTML)\s*=""")),
     ("external-fetch", re.compile(r"""\b(?:fetch|axios(?:\.get|\.post)?|request\.continue)\s*\(""")),
 ]
