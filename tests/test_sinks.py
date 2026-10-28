@@ -867,7 +867,10 @@ class TestTheCliGuardIsOneNumber(unittest.TestCase):
         code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
         # [0-9.]+ rather than \d+ (agents-kevst): a FLOAT literal is the same drift with different
         # punctuation, and the integer-only pattern let the reviewer's float mutant through silently.
-        literals = re.findall(r"timeout=([0-9.]+)", code)
+        # \s*=\s* (agents-aau00): `timeout = 1.5` is the SAME runtime bound as `timeout=1.5`, and the
+        # reviewer proved the spaced spelling walked past the guard untouched - a gap exactly one PEP 8
+        # habit wide, since Black and every formatter here would happily produce it.
+        literals = re.findall(r"timeout\s*=\s*([0-9.]+)", code)
         self.assertEqual(
             literals, [],
             "every subprocess bound in this file must use _CLI_GUARD_S; found literal timeout(s) "
