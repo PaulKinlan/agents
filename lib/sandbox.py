@@ -356,7 +356,10 @@ def _probe() -> bool:
     _system_binds(plan)
     plan.dev("/dev")
     plan.tmpfs("/tmp")
-    argv = [bwrap, *plan.argv, "--die-with-parent", "--new-session", "--", "/bin/true"]
+    # This short-lived availability probe must stay in the caller's session: a timed-out
+    # bwrap with --new-session can leave a detached child after subprocess.run returns.
+    # Runtime wraps still use --new-session (sandbox_command), where isolation is required.
+    argv = [bwrap, *plan.argv, "--die-with-parent", "--", "/bin/true"]
     try:
         res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
