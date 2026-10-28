@@ -398,20 +398,44 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
-def _proposes_execution_concurrency(finding: Dict[str, Any]) -> bool:
-    """Guard proposed changes, not background concurrency described by a finding.
+# A model can put actionable advice in a finding's title or description instead of the
+# remediation field (e.g. "Fix: use Promise.all"). Require an advisory clause, not just
+# descriptive "queries run in parallel" prose. Keep the execution pattern as the second
+# check so unrelated imperatives do not trigger the reentrancy guard.
+_DESCRIPTION_ADVICE_CLAUSE = re.compile(
+    r"(?:^|[.;!?]\s*)(?:(?:fix|solution|recommendation|suggestion|proposal)\s*:\s*)?"
+    r"(?:please\s+|you\s+should\s+|should\s+)?"
+    r"(?:use|run|start|execute|issue|send|dispatch|await|call|replace|switch|make|"
+    r"parallelize|batch|overlap|schedule)\b(?:[^.;\n]|\.(?!\s|$))*",
+    re.IGNORECASE | re.MULTILINE,
+)
 
-    Title/description may describe existing parallel DNS queries or a vulnerability. Only a
-    remediation or added patch line can propose execution concurrency that needs a reentrancy
-    precondition. Keep the public classifier's description fallback for callers that inspect
-    concurrency topics, but never turn that fallback alone into a report rejection.
+
+def _description_concurrency_advice(finding: Dict[str, Any]) -> str:
+    """First explicit title/description advice clause that recommends concurrent work."""
+    for field in ("title", "description"):
+        for clause in _DESCRIPTION_ADVICE_CLAUSE.finditer(str(finding.get(field, ""))):
+            if _EXECUTION_CONCURRENCY_PATTERN.search(clause.group()):
+                return clause.group().strip(" ;.!?")
+    return ""
+
+
+def _proposes_execution_concurrency(finding: Dict[str, Any]) -> bool:
+    """Distinguish proposed concurrency from background concurrency in finding context.
+
+    A remediation or added patch can propose execution concurrency; title/description
+    counts only when an advisory clause itself names the concurrent action. This prevents
+    a DNS vulnerability describing existing parallel queries from gaining an impossible
+    reentrancy precondition without exempting description-only advice.
     """
-    if not isinstance(finding, dict):
+    if not isinstance(finding, dict) or finding.get("false_positive") is True:
         return False
-    return is_concurrency_recommendation({
-        key: finding[key] for key in ("rule_id", "false_positive", "remediation", "proposed_fix_diff")
-        if key in finding
-    })
+    actionable = {key: finding[key]
+                  for key in ("rule_id", "false_positive", "remediation", "proposed_fix_diff")
+                  if key in finding}
+    if is_concurrency_recommendation(actionable):
+        return True
+    return bool(_description_concurrency_advice(finding))
 
 
 # Domains and primitives where concurrency is often non-reentrant or stateful
@@ -706,6 +730,13 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
                 flags=re.IGNORECASE,
             ).strip()
             clean_rem = _paraphrase_clause_start_connectors(clean_rem).rstrip().rstrip(";,.")
+            if not _EXECUTION_CONCURRENCY_PATTERN.search(clean_rem):
+                # A proposal can be written only in title/description. Carry the actual
+                # advice into the guarded branch; wrapping a neutral remediation alone
+                # would still fail the validator's reentrancy-precondition check.
+                advice = _description_concurrency_advice(finding)
+                if advice:
+                    clean_rem = f"{clean_rem}; {advice}" if clean_rem else advice
             if clean_rem:
                 finding["remediation"] = (
                     "Precondition: Verify backend reentrancy before applying. "
