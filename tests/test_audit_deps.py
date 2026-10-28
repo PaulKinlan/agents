@@ -500,6 +500,10 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
         cfg = load_yaml(ROOT / "agents" / "deps-supply-chain" / "agent.yaml")
         declared_seconds = float(cfg["budget"]["max_minutes"]) * 60
         self.assertGreater(audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 0)
+        self.assertLessEqual(audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 30,
+                             "npm registry stalls must release the engine budget promptly")
+        self.assertGreaterEqual(declared_seconds - audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 240,
+                                "an npm-only timeout must leave at least 240s for the engine")
         self.assertGreater(audit_deps.PIP_AUDIT_TIMEOUT_SECONDS, 0)
         # Worst case (polyglot target running BOTH audits) must stay inside the declared
         # station budget, which the pre-pass shares with the engine and findings dispatch.
