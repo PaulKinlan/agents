@@ -302,13 +302,18 @@ def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") 
                 return desc_fn(m)
     return None
 
-# Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,
-# a huge tree) must not hold the run. Fixed cap: these calls are not stations and have no agent
-# budget in scope. Expiry is a non-zero (124) result, which the existing branches handle.
+# Local git plumbing must not hold the run indefinitely. The default covers diff/patch work;
+# disposable worktree setup and cleanup use shorter bounds below so a wedged checkout cannot
+# consume the station's allowance and strand independent downstream stations (agents-nf54e).
 GIT_TIMEOUT_SECONDS = 120
+# Disposable worktrees are setup/cleanup, not the station's useful work. A stalled
+# checkout plus two cleanup commands used to consume the line's whole allowance and
+# skip independent downstream stations (agents-nf54e).
+GIT_WORKTREE_ADD_TIMEOUT_SECONDS = 30
+GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 10
 
 
-def _run_git(args, cwd):
+def _run_git(args, cwd, *, timeout_seconds=None):
     """Run local git plumbing with a hard timeout; expiry is a non-zero (124) result.
 
     `args` EXCLUDE the binary name: the git executable is resolved and authenticated by
@@ -320,15 +325,16 @@ def _run_git(args, cwd):
     being executed under a stale verification.
     """
     cmd = [resolve_tool("git"), *args]
+    bound = GIT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
         return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                              check=False, timeout=GIT_TIMEOUT_SECONDS, env=child_environment())
+                              check=False, timeout=bound, env=child_environment())
     except subprocess.TimeoutExpired as e:
         stdout = e.stdout if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", "replace")
         stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr or b"").decode("utf-8", "replace")
         return subprocess.CompletedProcess(
             cmd, 124, stdout,
-            f"{stderr}\n[factory] git command timed out after {GIT_TIMEOUT_SECONDS}s",
+            f"{stderr}\n[factory] git command timed out after {bound}s",
         )
 
 
@@ -352,23 +358,35 @@ def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
     max_attempts = 3
     res = None
     for attempt in range(1, max_attempts + 1):
-        res = _run_git(["worktree", "add", "--detach", str(worktree_dir)], target_dir)
+        res = _run_git(["worktree", "add", "--detach", str(worktree_dir)], target_dir,
+                       timeout_seconds=GIT_WORKTREE_ADD_TIMEOUT_SECONDS)
         if res.returncode == 0:
             break
         stderr = (res.stderr or "").strip()
+        if res.returncode == 124:
+            # Partial stderr may mention an index.lock, but a timed-out checkout is not a
+            # transient lock retry: three attempts would spend up to 90s before cleanup.
+            break
         # If failure is due to a stale worktree registration, prune and retry immediately
         if "already registered worktree" in stderr or "use 'prune'" in stderr:
-            _run_git(["worktree", "prune"], target_dir)
+            _run_git(["worktree", "prune"], target_dir,
+                     timeout_seconds=GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS)
         elif "lock" in stderr.lower() and attempt < max_attempts:
             time.sleep(0.05 * (2 ** (attempt - 1)))
         else:
             break
 
     if res is None or res.returncode != 0:
-        raise StationError(
-            f"cannot create the disposable session worktree at {worktree_dir}: git worktree "
-            f"add exited {getattr(res, 'returncode', 'unknown')}: {(getattr(res, 'stderr', '') or '').strip()}")
-    gitdir = _run_git(["rev-parse", "--absolute-git-dir"], worktree_dir)
+        detail = (f"cannot create the disposable session worktree at {worktree_dir}: git worktree "
+                  f"add exited {getattr(res, 'returncode', 'unknown')}: "
+                  f"{(getattr(res, 'stderr', '') or '').strip()}")
+        if res is not None and res.returncode == 124:
+            # run_line treats a non-gate station timeout as INCOMPLETE and continues;
+            # StationError would halt the line and skip every downstream station.
+            raise StationTimeout(detail)
+        raise StationError(detail)
+    gitdir = _run_git(["rev-parse", "--absolute-git-dir"], worktree_dir,
+                      timeout_seconds=GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS)
     if gitdir.returncode != 0 or not gitdir.stdout.strip():
         raise StationError(
             f"cannot resolve the session worktree's admin gitdir at {worktree_dir}: git "
@@ -583,7 +601,8 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
     .git marker; if the git remove still fails, the directory is deleted directly (it is under
     the run dir) and pruned, so no leak survives."""
     try:
-        res = _run_git(["worktree", "remove", "--force", str(worktree_dir)], target_dir)
+        res = _run_git(["worktree", "remove", "--force", str(worktree_dir)], target_dir,
+                       timeout_seconds=GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS)
         if res.returncode != 0:
             sys.stderr.write(
                 f"[factory] worktree cleanup 'remove' exited {res.returncode}: "
@@ -595,7 +614,8 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
         # under the run dir, so removing it directly is safe; prune then clears the admin entry.
         shutil.rmtree(worktree_dir, ignore_errors=True)
     try:
-        prune = _run_git(["worktree", "prune"], target_dir)
+        prune = _run_git(["worktree", "prune"], target_dir,
+                         timeout_seconds=GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS)
         if prune.returncode != 0:
             sys.stderr.write(
                 f"[factory] worktree cleanup 'prune' exited {prune.returncode}: "
@@ -2363,7 +2383,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                       unpinned_note=unpinned_note), indent=2)
                     _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if worktree_dir is not None:
-                worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+                try:
+                    worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+                except StationTimeout as e:
+                    _write_run_artifact(run_dir / "failure_reason.txt", str(e) + "\n")
+                    raise
                 # agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted
                 # session could pre-place run_dir/session.patch and be credited with a proposal
                 # it never made in the worktree. Unlink before the engine so only
@@ -3479,7 +3503,7 @@ def run_hillclimb(
         worktree_dir = proposal_run_dir / "worktree"
         try:
             worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
-        except StationError as e:
+        except (StationError, StationTimeout) as e:
             # P2-1 (agents-nei): _create_session_worktree can raise AFTER `git worktree add`
             # succeeded (e.g. rev-parse fails), leaving a registered admin worktree under the
             # target's .git. Run the cleanup helper (idempotent, best-effort) before deleting
