@@ -632,6 +632,50 @@ class TestPythonEntryPointShapes(unittest.TestCase):
             [("code-execution", n) for n in range(6, 14)],
             f"every Python spawn shape must be inventoried exactly once, got: {results}")
 
+    def test_python_from_import_alias_forms_detected(self):
+        """agents-a2pke: `from subprocess import Popen` + a bare `Popen(...)` call is the SAME
+        sink as the dotted form, and distinctive names are matchable bare - create_subprocess_
+        shell/exec already were (the reviewer's measured repro: 21 findings on dotted forms, 0
+        on alias forms). Precision boundary pinned in the same scan: bare `system(`/`popen(`
+        stay UNmatched (ordinary method-name collision risk), their dotted forms are covered
+        by test_python_spawns_detected."""
+        results = self._scan({
+            "app/srv.py": (  # the reviewer's exact repro
+                "from subprocess import Popen, check_output\n"
+                "Popen(['ls'])\n"
+                "check_output(['ls'])\n"
+            ),
+            "app/aliases.py": (
+                "from subprocess import check_call, getstatusoutput\n"
+                "from os import posix_spawn, execve, spawnv, system\n"
+                "\n"
+                "check_call(['ls'])\n"
+                "getstatusoutput('ls')\n"
+                "posix_spawn('/bin/ls', ['ls'], {})\n"
+                "execve('/bin/ls', ['ls'], {})\n"
+                "spawnv(0, '/bin/ls', ['ls'])\n"
+                "system('ls')\n"  # bare system: deliberately NOT a match (agents-a2pke)
+            ),
+            "app/lookalikes.py": (
+                "class Shell:\n"
+                "    def run(self):\n"
+                "        self.system('ls')\n"
+                "        self.popen('ls')\n"
+                "        return runner.popen('ls')\n"
+            ),
+        })
+        for r in results:
+            self.assertEqual(r["category"], "code-execution", f"unexpected category: {r}")
+        got = sorted((r["path"], r["line_number"]) for r in results)
+        expected = sorted([
+            ("app/srv.py", 2), ("app/srv.py", 3),
+            ("app/aliases.py", 4), ("app/aliases.py", 5), ("app/aliases.py", 6),
+            ("app/aliases.py", 7), ("app/aliases.py", 8),
+        ])
+        self.assertEqual(got, expected,
+                         "every distinctive alias form is inventoried exactly once, bare "
+                         f"system(/popen( and method lookalikes stay quiet, got: {results}")
+
     def test_python_lookalikes_stay_quiet(self):
         """Precision half: ordinary Python must not enter the attack-surface inventory.
 

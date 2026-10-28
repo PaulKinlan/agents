@@ -47,6 +47,10 @@ SECURITY_KEYWORDS = [
 #   bare; Django endpoints reach the inventory via their view decorators instead.
 # - Go listeners/spawns (`http.HandleFunc(`, `exec.Command(`) are still blind - same defect class,
 #   filed separately rather than widening this change.
+# - from-import aliases of NON-distinctive names (`from uvicorn import run` + bare `run(...)`,
+#   `from os import system` + bare `system(...)`): the names are too generic to match bare
+#   (agents-a2pke). Distinctive aliases (Popen, check_output, ...) ARE covered - see the
+#   code-execution pattern below.
 ENTRY_POINT_PATTERNS = [
     # JS/TS listeners plus Python ones: WSGI/ASGI route decorators (@app.route, @router.get,
     # @bp.post, ...), stdlib servers (HTTPServer, socketserver's TCPServer family, wsgiref's
@@ -66,11 +70,20 @@ ENTRY_POINT_PATTERNS = [
     # JS/TS execution sinks plus Python spawns: subprocess.*, os.system/popen/exec*/spawn*/
     # posix_spawn, and asyncio.create_subprocess_shell/exec. Bare `spawn(`/`exec(`/`eval(` were
     # already language-agnostic; `os.execv(` was NOT (bare `exec` requires the paren immediately).
+    # agents-a2pke: from-import ALIAS forms (`from subprocess import Popen` + a bare `Popen(...)`
+    # call) are covered by the distinctive bare names below - Popen, check_output, check_call,
+    # getstatusoutput, posix_spawn and the os exec[vl]*/spawn[vl]* families - names with no JS/TS
+    # collision, the same bar create_subprocess_shell/exec already met. Bare `system(`/`popen(`
+    # stay deliberately UNcovered (ordinary method-name collision risk: self.system(...)); their
+    # dotted os.* forms above are the coverage for those sinks. Per-line search makes the dotted
+    # and bare alternations overlap-proof: one finding per line per category, by construction.
     ("code-execution", re.compile(
         r"""\b(?:child_process|spawn|exec|execSync|execFile|eval|new Function"""
         r"""|subprocess\.(?:run|call|check_call|check_output|Popen|getstatusoutput)"""
         r"""|os\.(?:system|popen|exec\w+|spawn\w+|posix_spawn)"""
-        r"""|create_subprocess_(?:shell|exec))\s*\("""
+        r"""|create_subprocess_(?:shell|exec)"""
+        r"""|Popen|check_output|check_call|getstatusoutput|posix_spawn"""
+        r"""|exec[vl]\w*|spawn[vl]\w*)\s*\("""
     )),
     ("dom-injection", re.compile(r"""\b(?:innerHTML|outerHTML|document\.write|insertAdjacentHTML)\s*=""")),
     ("external-fetch", re.compile(r"""\b(?:fetch|axios(?:\.get|\.post)?|request\.continue)\s*\(""")),
