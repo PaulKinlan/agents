@@ -580,10 +580,6 @@ inventory=""
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue
-  # agents-wzmj (F1): per-path resolve mode reports THIS path's contribution rather than the running
-  # union, so what the accumulators held before this path is remembered here.
-  _fast_gate_mapped_before="$mapped"
-  _fast_gate_inventory_before="$inventory"
   # First match wins, across fragments in their pinned order - the semantics the single `case` had.
   #
   # THE UNMATCHED FALLBACK IS HERE, NOT A `*)` ARM IN THE REGISTRY, and that is a correctness requirement
@@ -592,6 +588,20 @@ while IFS= read -r f; do
   # failed loudly on a path it had just been given an arm for). In the loader, the fallback is last by
   # construction, so a fragment may take any number.
   _fast_gate_matched=""
+  # agents-kw7wl: in per-path resolve mode the accumulators are evaluated EMPTY for this path, so the
+  # record reports this path's OWN selection even when an earlier path in the same batch already
+  # contributed the same suite (or set the retention class): an accumulator-delta print can only see
+  # each suite once per BATCH, which mis-attributed shared suites to whichever path arrived first and
+  # dropped them from every later path's record. The union is restored after the record; union mode
+  # (and the plain dry run's byte-identity) keeps its shape.
+  if [ -n "${FAST_GATE_RESOLVE_PATHS:-}" ]; then
+    _fast_gate_saved_mapped="$mapped"
+    _fast_gate_saved_inventory="$inventory"
+    _fast_gate_saved_run="$run"
+    mapped=""
+    inventory=""
+    run=""
+  fi
   for _fast_gate_arm in $FAST_GATE_ARM_STAGES; do
     if "$_fast_gate_arm" "$f"; then
       _fast_gate_matched=1
@@ -657,9 +667,13 @@ while IFS= read -r f; do
     if [ -z "$_fast_gate_matched" ]; then
       printf '!%s\n' "$f"
     else
-      _fast_gate_own="$(printf '%s\n' ${mapped#"$_fast_gate_mapped_before"} ${inventory#"$_fast_gate_inventory_before"} | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ')"
-      printf '%s\t%s\n' "$f" "${_fast_gate_own% }"
+      printf '%s\t%s\n' "$f" "$(printf '%s\n' $mapped $inventory $run | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ' | sed 's/ $//')"
     fi
+    mapped="$_fast_gate_saved_mapped $(printf '%s\n' $mapped | awk 'NF && !seen[$0]++')"
+    mapped="$(printf '%s\n' $mapped | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
+    run="$_fast_gate_saved_run $(printf '%s\n' $run | awk 'NF && !seen[$0]++')"
+    run="$(printf '%s\n' $run | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
+    inventory="$_fast_gate_saved_inventory"
   fi
 done <<< "$changed"
 
@@ -737,7 +751,7 @@ consumer_coverage="tests/test_fast_gate_consumer_coverage.py"
 if [ -n "${FAST_GATE_RESOLVE_PATHS:-}" ]; then
   FAST_GATE_TERMINATED=1
   fast_gate_report_ignored_arms
-  printf ':always\t%s\n' "$(printf '%s\n' $run $tree_guards $consumer_coverage | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ')"
+  printf ':always\t%s\n' "$(printf '%s\n' $tree_guards $consumer_coverage | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ')"
   exit 0
 fi
 

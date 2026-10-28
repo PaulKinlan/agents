@@ -186,6 +186,144 @@ def oracle_coverage_for(changed_files: list[str], executed_suites: list[str]):
             return oracle.extract_coverage(log.name, str(ROOT), "HEAD", "bash tools/fast-gate.sh")
 
 
+# --- agents-kw7wl: ONE gate startup answers this module's mapping probes ---
+# This module used to boot tools/fast-gate.sh once per probe (~110 startups, ~3s each: bash,
+# registry load, delta resolution) - most of its wall time was startup overhead, and it made
+# the fast gate pay for the mapping table's breadth on every run. The resolution itself was
+# never the thing under test for most probes: what each pin asserts is "path P maps to suites
+# S" (or refuses, or falls back quietly), and FAST_GATE_RESOLVE_PATHS (agents-ub3k) already
+# resolves MANY paths per startup with per-path records. So setUpModule() resolves the whole
+# probe inventory in ONE batched startup and the helpers below serve cache hits from those
+# records; the loud-refusal and quiet-fallback probes each share ONE raw capture for the same
+# reason. What KEEPS its own startup: everything that tests the gate's PROCESS semantics
+# (base resolution, execution markers, format errors, refusal wording beyond path naming,
+# registry fragments in staged copies) and the tests of the batch resolver itself.
+_PROBE_INVENTORY: tuple[str, ...] = (
+    # Literal single-path probes (every resolve_fast_gate(["..."]) / resolve_path_status("...")).
+    ".gitignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "THREAT_MODEL.md",
+    ".github/workflows/ci.yml",
+    ".github/actions/factory/action.yml",
+    "agents/accessibility/scripts/audit_a11y.py",
+    "agents/deps-supply-chain/scripts/audit_deps.py",
+    "agents/docs-drift/SKILL.md",
+    "agents/issue-triage/scripts/fetch_issues.py",
+    "agents/log-check/scripts/parse_logs.py",
+    "agents/modern-web/scripts/guides_index.json",
+    "agents/perf-review/scripts/scan_perf_changes.py",
+    "agents/pr-fixer/scripts/collect_failures.py",
+    "agents/vuln-verify/SKILL.md",
+    "agents/vuln-verify/agent.yaml",
+    "docs/INTEGRATION.md",
+    "docs/css/factory.css",
+    "factory",
+    "findings/suppressions.yaml",
+    "install.sh",
+    "lib/adapters/claude.sh",
+    "lib/adapters/deepseek.sh",
+    "lib/adapters/pi.sh",
+    "lib/budget.py",
+    "lib/candidate_identity.py",
+    "lib/child_env.py",
+    "lib/containment.py",
+    "lib/credential_broker.py",
+    "lib/findings.py",
+    "lib/report_schema.py",
+    "lib/sandbox.py",
+    "lib/sinks/base.py",
+    "lib/sinks/github.py",
+    "lib/tool_pins.py",
+    "lib/yaml_mini.py",
+    "lines/web-excellence.yaml",
+    "patches/README.md",
+    "patches/no-such-artifact-anyone-reads.patch",
+    "reports/factory-security-audit.md",
+    "targets/README.md",
+    "targets/voicebox.yaml",
+    "tests/__init__.py",
+    "tests/containment_harness.py",
+    "tests/coverage-contract.json",
+    "tests/fixtures/fake_engine.sh",
+    "tests/hermetic_env.py",
+    "tests/test_removed_by_an_earlier_change.py",
+    "tests/test_schedules.py",
+    "tests/test_summary_identity.py",
+    "tests/test_budget.py",
+    "tests/test_target_readme_inventory.py",
+    "tests/test_tree_guards.py",
+    "tools/check.conf",
+    "tools/check-cmd.sh",
+    "tools.yaml",
+    "tools/fast-gate-arms.d/999-anything.sh",
+    "tools/fast-gate-arms.d/README.md",
+    "tools/fast-gate.sh",
+    "tools/generate-tool-pins.sh",
+    "tools/red-first.sh",
+)
+# Paths whose probe must REFUSE loudly. One shared startup captures the refusal naming ALL of
+# them; each loud pin then asserts its path is named and the exit is nonzero. A probe that
+# needs refusal WORDING beyond the path name (the space-separated format note, the mixed
+# mapped-sibling case) keeps its own startup below.
+_REFUSAL_PROBES: tuple[str, ...] = (
+    "package.json",
+    "targets/undocumented.md",
+    "tools/new_gate.conf",
+    "tools/custom-gate.sh",
+    ".codex/unreviewed.sh",
+    ".codex/new_helper.py",
+    ".beads/unexpected.sh",
+    ".beads/scripts/evil.py",
+)
+# Paths claimed by a documented ignore arm: rc 0, empty stdout. One shared capture.
+_QUIET_PROBES: tuple[str, ...] = (
+    ".agents/skills/beads/SKILL.md",
+    ".agents/skills/beads/agents/openai.yaml",
+    ".claude/settings.json",
+    ".codex/config.toml",
+    ".codex/hooks.json",
+    "skills",
+    ".beads/metadata.json",
+    "findings/scan-notes.md",
+    "findings/.gitkeep",
+    "schedules/.gitkeep",
+)
+
+# Populated by setUpModule(); the helpers consult it before paying for a startup.
+_PATH_RECORDS: dict[str, tuple[str, list[str]]] = {}
+_ALWAYS_SUITES: set[str] = set()
+_SHARED_REFUSALS: dict[str, subprocess.CompletedProcess] = {}
+_SHARED_QUIETS: dict[str, subprocess.CompletedProcess] = {}
+
+
+def setUpModule():
+    """Resolve every mapping probe this module makes in THREE gate startups (agents-kw7wl).
+
+    One batched resolve_paths_mapping() over the inventory (literal probes plus the glob-derived
+    lib/, lib/sinks/ and patches/ populations the loop pins walk), one shared raw refusal, one
+    shared raw quiet fallback. If an inventory path stops being mapped, the batch refuses and
+    every test in the module errors together - the refusal names the path, which is the defect
+    report. Adding a pin: add its path to _PROBE_INVENTORY (globs cover whole directories), and
+    only give it its own startup when it asserts PROCESS semantics a record cannot express.
+    """
+    inventory = set(_PROBE_INVENTORY)
+    inventory.update(str(p.relative_to(ROOT)) for p in ROOT.glob("lib/*.py"))
+    inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("lib/sinks") if p.suffix == ".py")
+    inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("patches") if p.suffix == ".patch")
+    records, always_suites = resolve_paths_mapping(sorted(inventory), with_always=True)
+    _PATH_RECORDS.update(records)
+    _ALWAYS_SUITES.update(always_suites)
+
+    refusal_proc = run_fast_gate(sorted(set(_REFUSAL_PROBES)))
+    for probe in _REFUSAL_PROBES:
+        _SHARED_REFUSALS[probe] = refusal_proc
+    quiet_proc = run_fast_gate(sorted(set(_QUIET_PROBES)))
+    for probe in _QUIET_PROBES:
+        _SHARED_QUIETS[probe] = quiet_proc
+
+
 def run_fast_gate(changed_files: list[str]) -> subprocess.CompletedProcess:
     """Execute tools/fast-gate.sh with simulated changed files and return the raw result."""
     diff_text = "\n".join(changed_files)
@@ -222,7 +360,17 @@ def resolve_fast_gate(changed_files: list[str]) -> list[str]:
     when tools/fast-gate.sh refuses changed files because they match no mapping arm. Any other gate
     execution failure raises standard subprocess.CalledProcessError. To distinguish 'deliberate_empty'
     from 'unmapped' and 'mapped' with status inspection, use resolve_path_status() or resolve_paths_mapping().
+
+    agents-kw7wl: a single path that setUpModule()'s batched inventory already resolved is served
+    from those records (deliberate-empty stays []), so per-path mapping pins cost no startup.
     """
+    if len(changed_files) == 1 and changed_files[0] in _PATH_RECORDS:
+        status, suites = _PATH_RECORDS[changed_files[0]]
+        if status != "mapped":
+            return []
+        # The plain dry run adds the always-on tiers to every non-empty selection (and falls
+        # back to NO output for a deliberate-empty path) - mirror that exactly (agents-kw7wl).
+        return sorted(set(suites) | _ALWAYS_SUITES)
     res = run_fast_gate(changed_files)
     if res.returncode != 0:
         if "match no mapping arm" in res.stderr and any(f"fast-gate:   {p}" in res.stderr for p in changed_files):
@@ -231,12 +379,17 @@ def resolve_fast_gate(changed_files: list[str]) -> list[str]:
     return res.stdout.strip().split()
 
 
-def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
+def resolve_paths_mapping(paths: list[str], with_always: bool = False):
     """Execute tools/fast-gate.sh in FAST_GATE_RESOLVE_PATHS mode to resolve mapping status for multiple paths (agents-ub3k, agents-cuugh).
 
     Returns a dict mapping each path to a tuple (status, suites):
       - ("mapped", [suite, ...]): an arm matched and selected suites
       - ("deliberate_empty", []): an arm matched and deliberately selected no suites
+
+    With with_always=True (agents-kw7wl), returns (records, always_suites) where always_suites is
+    the sorted payload of the :always line - the always-on tiers the PLAIN dry run adds to every
+    selection but the per-path records do not carry. setUpModule() needs it to make cached
+    resolve_fast_gate() results byte-equivalent to a real single-path run.
 
     Raises UnmappedPathError if any path in the batch matches no mapping arm.
     Raises subprocess.CalledProcessError if the gate exits with an execution error, or if
@@ -258,10 +411,12 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
 
     always_seen = False
+    always_suites: list[str] = []
     out = {}
     for line in lines:
         if line.startswith(":always\t"):
             always_seen = True
+            always_suites = sorted(line.split("\t", 1)[1].split())
             continue
         if line.startswith("!"):
             raise UnmappedPathError(1, proc.args, output=proc.stdout, stderr=proc.stderr)
@@ -281,6 +436,8 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
         if p not in out:
             raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
 
+    if with_always:
+        return out, always_suites
     return out
 
 
@@ -289,7 +446,13 @@ def resolve_path_status(path: str) -> tuple[str, list[str]]:
 
     Returns (status, suites) where status is "mapped", "deliberate_empty", or "unmapped".
     Raises subprocess.CalledProcessError on gate execution errors or incomplete runs.
+
+    agents-kw7wl: paths resolved by setUpModule()'s batched inventory are answered from those
+    records without a startup; anything else (unmapped probes, mocked-crash fixtures) still
+    boots the gate so the PROCESS behaviour under test is the real one.
     """
+    if path in _PATH_RECORDS:
+        return _PATH_RECORDS[path]
     env = os.environ.copy()
     env["GIT_CHANGED"] = path
     env["FAST_GATE_RESOLVE_PATHS"] = "1"
@@ -603,7 +766,10 @@ class TestFastGateMapping(unittest.TestCase):
         """agents-cuugh: gate execution errors must propagate as CalledProcessError rather than UnmappedPathError or ('unmapped', [])."""
         from unittest.mock import patch
 
-        p = "patches/no-such-artifact-anyone-reads.patch"
+        # A fixture name that is NOT in setUpModule()'s inventory: this test's assertions are
+        # about the helpers' PROCESS behaviour on a crashed gate, which only exists on a real
+        # (here: mocked) subprocess call - a cached record would silently bypass the mock.
+        p = "patches/mock-crash-probe.patch"
         crashed_proc = subprocess.CompletedProcess(
             ["bash", "tools/fast-gate.sh"], 1, "", "fast-gate: FAIL: could not load arms"
         )
@@ -1061,7 +1227,7 @@ class TestFastGateMapping(unittest.TestCase):
         for path in (".beads/metadata.json", "findings/scan-notes.md",
                      "findings/.gitkeep", "schedules/.gitkeep"):
             with self.subTest(path=path):
-                res = run_fast_gate([path])
+                res = _SHARED_QUIETS[path]
                 self.assertEqual(res.returncode, 0, f"{path}: ignored path must not fail (agents-9nir): {res.stderr}")
                 self.assertEqual(res.stdout.strip(), "", f"{path}: ignored path must map to no suite (agents-9nir)")
 
@@ -1091,7 +1257,7 @@ class TestFastGateMapping(unittest.TestCase):
         path = "targets/undocumented.md"
         self.assertFalse((ROOT / path).exists(),
                          "synthetic future Markdown path is now present; move the fixture, do not drop refusal")
-        res = run_fast_gate([path])
+        res = _SHARED_REFUSALS[path]
         self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
         self.assertIn(path, res.stderr, f"{path}: the failure must name the file (agents-9nir)")
 
@@ -1132,7 +1298,7 @@ class TestFastGateMapping(unittest.TestCase):
         """
         for path in ("package.json", "targets/undocumented.md"):
             with self.subTest(path=path):
-                res = run_fast_gate([path])
+                res = _SHARED_REFUSALS[path]
                 self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
                 self.assertIn(path, res.stderr, f"{path}: the failure must name the unmatched file (agents-9nir)")
                 self.assertIn("no mapping arm", res.stderr)
@@ -1150,7 +1316,7 @@ class TestFastGateMapping(unittest.TestCase):
         fast_gate_content = arm_registry_text()
         for path in ("tools/new_gate.conf", "tools/custom-gate.sh"):
             with self.subTest(path=path):
-                res = run_fast_gate([path])
+                res = _SHARED_REFUSALS[path]
                 self.assertNotEqual(res.returncode, 0, f"{path} must fail loudly")
                 self.assertIn(path, res.stderr, f"{path} must be named in the error")
                 self.assertIn("gate/provisioning config", res.stderr)
@@ -1200,7 +1366,7 @@ class TestFastGateMapping(unittest.TestCase):
         )
         for path in claimed_without_a_suite:
             with self.subTest(path=path):
-                res = run_fast_gate([path])
+                res = _SHARED_QUIETS[path]
                 self.assertEqual(res.returncode, 0,
                                  f"{path}: must not abort the gate (agents-l80j)\n{res.stderr}")
                 self.assertNotIn("no mapping arm", res.stderr, f"{path}: still reads as unmapped")
@@ -1219,7 +1385,7 @@ class TestFastGateMapping(unittest.TestCase):
         # The future path is only a simulated changed-path probe, not a current tracked file.
         for path in ("package.json", "targets/undocumented.md"):
             with self.subTest(path=path):
-                res = run_fast_gate([path])
+                res = _SHARED_REFUSALS[path]
                 self.assertNotEqual(res.returncode, 0,
                                     f"{path}: deliberate loud failure must not be silenced (agents-9nir)")
                 self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
@@ -1230,7 +1396,7 @@ class TestFastGateMapping(unittest.TestCase):
         # refused, so this test is red against the revision the finding describes.
         for path in (".codex/unreviewed.sh", ".codex/new_helper.py"):
             with self.subTest(path=path):
-                res = run_fast_gate([path])
+                res = _SHARED_REFUSALS[path]
                 self.assertNotEqual(res.returncode, 0,
                                     f"{path}: a new file in an exempt directory must NOT be exempt "
                                     "(agents-dxtx - the exemption is per file, not per directory)")
@@ -1250,21 +1416,22 @@ class TestFastGateMapping(unittest.TestCase):
         ignored = [path for path in tracked if not path.startswith(".beads/hooks/")]
         hooks = [path for path in tracked if path.startswith(".beads/hooks/")]
         self.assertTrue(ignored and hooks, "both named exemptions and hook mapping must have tracked examples")
-        for path in ignored:
-            with self.subTest(exempt=path):
-                res = run_fast_gate([path])
-                self.assertEqual(res.returncode, 0, f"{path}: named exemption must not abort the gate")
-                self.assertEqual(res.stdout.strip(), "", f"{path}: named exemption selects no suite")
+        # agents-kw7wl: the derived populations resolve in ONE batched startup each instead of
+        # one startup per path (the static refusal probes share setUpModule()'s capture).
+        quiet_proc = run_fast_gate(ignored)
+        self.assertEqual(quiet_proc.returncode, 0, f"named exemptions must not abort the gate: {quiet_proc.stderr}")
+        self.assertEqual(quiet_proc.stdout.strip(), "", "named exemptions select no suite")
+        hook_records = resolve_paths_mapping([*hooks, ".beads/hooks/new-hook.sh"])
         for path in (*hooks, ".beads/hooks/new-hook.sh"):
             with self.subTest(selected_hook=path):
-                res = run_fast_gate([path])
-                self.assertEqual(res.returncode, 0, f"{path}: hook path maps rather than refusing: {res.stderr}")
-                self.assertIn("tests/test_beads_hook_fail_open.py", res.stdout.splitlines(),
+                status, suites = hook_records[path]
+                self.assertEqual(status, "mapped", f"{path}: hook path maps rather than refusing")
+                self.assertIn("tests/test_beads_hook_fail_open.py", suites,
                               f"{path}: hook suite must be SELECTED before the ignore arm; "
                               "selection does NOT prove hook-content coverage (agents-3ryx pins tracked names)")
         for path in (".beads/unexpected.sh", ".beads/scripts/evil.py"):
             with self.subTest(unmatched_non_hook=path):
-                res = run_fast_gate([path])
+                res = _SHARED_REFUSALS[path]
                 self.assertNotEqual(res.returncode, 0,
                                     f"{path}: a new UNMAPPED non-hook path must NOT be exempt "
                                     "(agents-3jb4 - exemption is per file, not per directory)")
@@ -1653,6 +1820,13 @@ class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
     )
 
     def _selected(self, path: str) -> set:
+        # agents-kw7wl: the class-keyed retention add-on IS part of the batched per-path record
+        # (measured: tools/red-first.sh's record carries tests/test_retention.py), so cached
+        # records answer selection facts exactly as the raw dry run does. Paths that are not
+        # in the inventory because the gate must REFUSE them (tests/some_runner.sh) keep a real
+        # startup: their "selection" is the empty set a refusal produces.
+        if path in _PATH_RECORDS:
+            return set(_PATH_RECORDS[path][1])
         proc = run_fast_gate([path])
         out = proc.stdout + proc.stderr
         return {ln.strip() for ln in out.splitlines()
@@ -1807,13 +1981,19 @@ class TestReplacedGenericArmsKeepTheirNamesake(unittest.TestCase):
     def test_each_replaced_arm_still_selects_its_namesake_and_its_consumers(self):
         for path, info in self.CASES.items():
             with self.subTest(path=path):
-                proc = subprocess.run(
-                    ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
-                    env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=120,
-                )
-                out = proc.stdout + proc.stderr
-                selected = {ln.strip() for ln in out.splitlines()
-                            if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
+                # agents-kw7wl: the selection fact is the batched per-path record plus the
+                # always-on tiers - the same set the raw dry run prints (records carry the
+                # class-keyed retention add-on and the self-run; setUpModule() measures them).
+                if path in _PATH_RECORDS:
+                    selected = set(_PATH_RECORDS[path][1]) | _ALWAYS_SUITES
+                else:
+                    proc = subprocess.run(
+                        ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
+                        env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=120,
+                    )
+                    out = proc.stdout + proc.stderr
+                    selected = {ln.strip() for ln in out.splitlines()
+                                if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
                 self.assertIn(
                     info["namesake"], selected,
                     f"{path}: the replaced arm DROPS the module's own suite {info['namesake']} - the arm "
