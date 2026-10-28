@@ -29,8 +29,11 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent
 # `factory integrate` measured 4.8s standalone on this VM; the old per-call bound was 10s - roughly
 # 2x a quiet-box figure with nothing for gate load - and it reddened a healthy full gate
 # (agents-c9t7h). The bound is now ONE constant sized from the measurement, the policy
-# tests/test_sinks.py established (agents-g4cq9/0qyjo): 45s covers 4x the worst measured run plus
-# the +42% in-gate contention penalty measured on this VM, with room to spare. It is a hang guard,
+# tests/test_sinks.py established (agents-g4cq9/0qyjo). THE ARITHMETIC ACTUALLY USED
+# (agents-jdofv): 45s is the TOP OF THE BEAD'S 30-45s RANGE, not a formula result - 4x the 4.8s
+# measurement is 19.2s, and carrying the +42% in-gate contention penalty this VM measured gives
+# 27.3s; 45s covers that with room to spare (9.4x the raw measurement, 6.6x the contended one),
+# so the >=3x guard below holds against the raw run by construction. It is a hang guard,
 # not a sleep - a generous bound only delays detecting a real hang. If the ~2s CLI startup cost
 # ever lands, lower it HERE, in one place.
 _CLI_GUARD_S = 45
