@@ -554,14 +554,35 @@ class TestRunStationCommand(unittest.TestCase):
             parent.write_text(parent_code, encoding="utf-8")
             heartbeat = root / "heartbeat"
 
-            budget = StationBudget(0.03, label="hung")  # 1.8 s
+            # agents-81o6f: 0.2 min (12 s), not 0.03 (1.8 s). The old stimulus was SHORTER THAN THE
+            # STARTUP IT DEPENDS ON, which made a correct implementation fail on a loaded box: this test
+            # needs the grandchild to be RUNNING when expiry fires, and getting there costs two python
+            # startups (the parent, then the child it spawns). Measured on this VM at load 5-9, a single
+            # `python3 lib/findings.py --help` took 0.6-3.3 s, so two of them is 1.2-6.6 s against a 1.8 s
+            # budget - the child frequently never started, and the failure surfaced as "the grandchild never
+            # started" rather than as the load it was. 12 s is ~2x the worst observed startup pair.
+            # COST: this test goes from ~2 s to ~13 s when the fast gate selects it. Paid deliberately:
+            # a flaky full gate costs 2869 s (the run that filed this bead).
+            budget = StationBudget(0.2, label="hung")  # 12 s
             with self.assertRaises(StationTimeout):
                 run_station_command(
                     [sys.executable, str(parent), str(child), str(heartbeat)],
                     budget, "engine", capture_output=True, text=True, check=False,
                 )
 
-            self.assertTrue(heartbeat.exists(), "the grandchild never started")
+            # agents-81o6f: WAIT for the grandchild instead of asserting the instant the station returns.
+            # The expired station has already been reaped, so the child may still be inside its own startup
+            # when this line runs; asserting on a race is a coin toss weighted by load, not a property.
+            # This WAITS for the observable, and fails only once a bounded deadline expires - at which point
+            # the message distinguishes "started too late to be tested" from "survived the kill".
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not heartbeat.exists():
+                time.sleep(0.02)
+            self.assertTrue(
+                heartbeat.exists(),
+                "the grandchild never started within 15 s of the expired station returning - the expiry "
+                "fired before the child could run, so this run proves nothing about the kill "
+                "(agents-81o6f: the stimulus must outlast the startup it depends on)")
             size_after_kill = heartbeat.stat().st_size
             time.sleep(0.5)
             self.assertEqual(heartbeat.stat().st_size, size_after_kill,
