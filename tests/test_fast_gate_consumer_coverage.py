@@ -50,6 +50,21 @@ ROOT = Path(__file__).resolve().parent.parent
 # cross-check is optional rather than the other way round.
 _FLEET_ORACLE = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverage.py")
 
+# Bound for the gate's own dry-run/resolve subprocess calls (agents-4jqna). The batch resolve (23
+# lib modules answered in ONE invocation) measured 42.70s, 50.60s, 42.70s on this VM at load 6.37;
+# the old per-call bound of 60s left 18% headroom over the quiet measurement, and at load 20.8 the
+# same call EXCEEDED it and reddened a full gate for a delta that does not touch the gate at all.
+# The cost is gate STARTUP - a fixed per-invocation cost multiplied by load on a 2-vCPU box shared
+# by ten lanes - so a wall-clock bound 1.18x the quiet measurement cannot hold. 210s is 4x the
+# worst measured run, the same measurement-sized shape as _CLI_GUARD_S in tests/test_sinks.py
+# (agents-0qyjo/g4cq9): a hang guard, not a sleep. The durable fix is gate-startup cost coming down
+# (agents-kw7wl); when it does, lower it HERE, in one place.
+_GATE_CLI_GUARD_S = 210
+
+# The worst standalone measurement behind _GATE_CLI_GUARD_S (see above), kept as its own number so
+# the guard below fails with the measurement in the message rather than with an opinion.
+_WORST_MEASURED_GATE_CLI_S = 50.6
+
 
 # ---------------------------------------------------------------------------------------------------
 # agents-pdth: THE GENERAL FAST-GATE COVERAGE PROPERTY
@@ -409,7 +424,7 @@ def _batch_resolutions(root=None):
         text=True,
         env={**os.environ, "GIT_CHANGED": "\n".join(paths), "FAST_GATE_RESOLVE_PATHS": "1",
              "FAST_GATE_DRY_RUN": "1"},
-        timeout=60,
+        timeout=_GATE_CLI_GUARD_S,
     )
     return _parse_resolutions(proc.stdout, proc.returncode)
 
@@ -436,7 +451,7 @@ def _selected_suites(module_path, root=None):
         capture_output=True,
         text=True,
         env={**os.environ, "GIT_CHANGED": module_path, "FAST_GATE_DRY_RUN": "1"},
-        timeout=60,
+        timeout=_GATE_CLI_GUARD_S,
     )
     out = proc.stdout + proc.stderr
     return {ln.strip() for ln in out.splitlines() if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
@@ -802,7 +817,7 @@ class TestTheResolveModeAnswersManyPathsInOneInvocation(unittest.TestCase):
             path = f"lib/{module}.py"
             proc = subprocess.run(
                 ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
-                env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=60,
+                env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=_GATE_CLI_GUARD_S,
             )
             union = {ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
                      if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
@@ -920,6 +935,37 @@ class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
             "module gained one, that is not automatically wrong - but it widens the mirror's claim, so "
             "record it here deliberately (agents-tuz8).",
         )
+
+
+class TestGateCliTimeoutPolicy(unittest.TestCase):
+    """Bounds on the gate's own subprocess calls are sized from measurement, once (agents-4jqna).
+
+    The third instance of the same drift in one week, after the beads-sink bound (agents-0qyjo) and
+    CHECK_FAST_TIMEOUT: a literal per-call bound sized on a quiet box reddens a healthy gate under
+    load. This module is part of the gate's own coverage contract, so when it flakes the gate
+    reddens on itself."""
+
+    def test_no_literal_timeout_remains_in_this_file(self):
+        """A reintroduced literal is how a file ends up with several bounds for the same CLI."""
+        source = (ROOT / "tests" / "test_fast_gate_consumer_coverage.py").read_text(encoding="utf-8")
+        # COUNT CODE, NOT PROSE (the agents-kevst lesson): only full-line comments are dropped, so a
+        # literal quoted in a TRAILING comment still trips the scan. The pattern is [0-9.]+ rather
+        # than integer-only: a float literal is the same drift with different punctuation.
+        code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+        literals = re.findall(r"timeout=([0-9.]+)", code)
+        self.assertEqual(
+            literals, [],
+            "every subprocess bound in this file must use _GATE_CLI_GUARD_S; found literal timeout(s) "
+            f"{literals} - re-inlining one is how three call sites for the SAME gate invocation ended "
+            "up sharing one quiet-box opinion (agents-4jqna)")
+
+    def test_the_guard_still_covers_the_worst_measured_run(self):
+        """Not a number chosen for looks: it is a multiple of a measurement, and the message says which."""
+        self.assertGreaterEqual(
+            _GATE_CLI_GUARD_S, 3 * _WORST_MEASURED_GATE_CLI_S,
+            f"_GATE_CLI_GUARD_S={_GATE_CLI_GUARD_S} has less than 3x headroom over the worst measured "
+            f"batch-resolve run ({_WORST_MEASURED_GATE_CLI_S}s at load 6.37); the gate reddens on a "
+            "busy box long before a real hang, which is what agents-4jqna was")
 
 
 def tearDownModule():
