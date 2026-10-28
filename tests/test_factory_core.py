@@ -22,6 +22,7 @@ from lib.findings import FindingsStore, compute_fingerprint, normalize_text
 from lib.child_env import BROKER_PROVIDERS, ENGINE_CREDENTIALS, child_environment
 from lib.credential_broker import PLACEHOLDER_PREFIX, keyless_providers
 from lib.sandbox import sandbox_available
+from lib.budget import StationBudget
 from lib.tool_pins import ToolPinError
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
@@ -353,7 +354,25 @@ class TestDispatcherBudget(unittest.TestCase):
 
         Without enforcement this test would sit for the stub's full 60 s and then report a
         clean zero-finding run — the failure mode the audit observed with a stale auth key.
+
+        THE STATION CLOCK IS FROZEN (agents-rdkqf). On a real clock, gate load let the
+        dispatcher's own setup (adapter copy, bwrap binds, validation) eat the whole 15 s budget
+        before the engine step, and the station exited through the exhausted-before-engine
+        pre-check (lib/budget.py timeout_for) instead of the engine kill: red on a healthy delta
+        (measured: fast-gate job 1fbcf023 on a comments-only change) AND vacuous - the hung
+        engine never launched, so that run proved nothing about killing one. With the clock
+        frozen, setup charges nothing, the engine step is always offered its full declared
+        allowance, and the real run_station_command kills the real sleep-60 stub at the real
+        communicate() expiry. Everything load-bearing stays real - budget arithmetic, the
+        group kill, the StationTimeout text; only the clock SOURCE is fake, and budget
+        construction from yaml is pinned by lib/budget's own tests.
         """
+        def frozen_budget(agent_cfg, label="station", override_minutes=None):
+            """Real StationBudget arithmetic over a clock that never advances (agents-rdkqf)."""
+            minutes = (override_minutes if override_minutes is not None
+                       else (agent_cfg.get("budget") or {}).get("max_minutes"))
+            return StationBudget(minutes, label=label, clock=lambda: 0.0)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = Path(tmpdir)
             (sandbox / "agents" / "hung").mkdir(parents=True)
@@ -362,7 +381,11 @@ class TestDispatcherBudget(unittest.TestCase):
                 "class: observer\n"
                 "containment: t0-readonly\n"
                 "short_circuit_empty: false\n"
-                "budget: {max_minutes: 0.25}\n",  # 15 s: headroom so pre-pass + sandbox bind setup finishes before the engine step
+                # 3 s kill window. This no longer needs headroom for setup: the frozen clock
+                # keeps setup from charging the budget at all, so the declaration only ever
+                # funds the engine's allowance - which is what makes the 0.25 -> 0.05 drop safe
+                # (and makes this test ~5x faster than the quiet-box 15 s it replaced).
+                "budget: {max_minutes: 0.05}\n",
                 encoding="utf-8",
             )
             # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the
@@ -389,13 +412,17 @@ class TestDispatcherBudget(unittest.TestCase):
             env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
             started = time.monotonic()
             with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.object(factory_cli, "budget_for", frozen_budget), \
                  mock.patch.dict(os.environ, env, clear=True):
                 with self.assertRaises(factory_cli.StationTimeout) as ctx:
                     factory_cli.run_agent("hung", str(target), engine_arg="pi")
             elapsed = time.monotonic() - started
             self.assertIn("engine 'pi'", str(ctx.exception))
             self.assertIn("station budget", str(ctx.exception))
-            self.assertLess(elapsed, 30, "the hung engine was not stopped at its budget")
+            # elapsed includes dispatcher setup, the load-dependent part; the budget itself only
+            # ever funds the 3 s engine allowance. Still sound as the enforcement pin: an
+            # unenforced run sits out the stub's full 60 s sleep.
+            self.assertLess(elapsed, 45, "the hung engine was not stopped at its budget")
 
 
 class TestDispatcherChildEnvironment(unittest.TestCase):
