@@ -603,8 +603,7 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
             observed.append(kwargs["timeout"])
             raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
 
-        with mock.patch.object(factory_cli, "resolve_tool", return_value="/usr/bin/git"), \
-             mock.patch.object(factory_cli.subprocess, "run", side_effect=expire):
+        with mock.patch.object(factory_cli.subprocess, "run", side_effect=expire):
             result = factory_cli._run_git(["worktree", "add"], self.tmp,
                                           timeout_seconds=factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS)
         self.assertEqual(observed, [factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS])
