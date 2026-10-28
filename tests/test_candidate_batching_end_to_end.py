@@ -807,6 +807,11 @@ class TestTruncationIsNamed(BatchedStation):
         # The other batches DID answer, and the point is that their rows are not settled as a verdict:
         self.assertTrue((run / "model_output.batch1.txt").exists())
         self.assertTrue((run / "model_output.batch3.txt").exists())
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["batch"], r["attempt"]) for r in retries], [(2, 1), (2, 2)])
+        self.assertTrue(retries[0]["retried"])
+        self.assertFalse(retries[1]["retried"])
+        self.assertIn("already retried once", retries[1]["not_retried_because"])
         classification = sorted(run.glob("output_classification*.json"))
         self.assertTrue(classification, "the rejected batch's evidence must be kept")
 
@@ -1236,6 +1241,28 @@ fi
 """ + _ROWS_BODY + r"""printf '%s]}\n' "$out"
 """
 
+# Two distinct malformed successful exits: an unquoted JSON value in batch 2, and a
+# schema-invalid report in batch 3. Each repairs itself on retry; batch 1 must run once.
+MALFORMED_ONCE_STUB = IDS_AND_ROWS + r"""
+if [[ " ${ids[*]} " == *" cand-perf-003 "* ]]; then
+  marker="$PI_CODING_AGENT_DIR/quote-attempted"
+  if [[ ! -e "$marker" ]]; then
+    : > "$marker"
+    printf '%s\n' '{"summary":notQuoted,"target":"probe-target","findings":[]}'
+    exit 0
+  fi
+fi
+if [[ " ${ids[*]} " == *" cand-perf-006 "* ]]; then
+  marker="$PI_CODING_AGENT_DIR/schema-attempted"
+  if [[ ! -e "$marker" ]]; then
+    : > "$marker"
+    printf '%s]}\n' "${out/,\"target\":\"probe-target\"/}"
+    exit 0
+  fi
+fi
+printf '%s]}\n' "$out"
+"""
+
 
 class ContextPruningStation(BatchedStation):
     def agent(self, yaml_text):  # noqa: D401 - stage the per-candidate context pre-pass
@@ -1298,6 +1325,30 @@ class TestATransientBatchFailureIsRetriedOnce(ContextPruningStation):
         # the retried call's answer is the one the merge saw
         answer = (run / "model_output.batch2.txt").read_text(encoding="utf-8")
         self.assertIn("cand-perf-003", answer)
+
+    def test_json_and_schema_rejections_retry_only_the_failed_batches(self):
+        """agents-4pwy0: keep valid earlier batches instead of restarting the whole station."""
+        self.agent(AGENT_YAML)
+        self.stub(MALFORMED_ONCE_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(report["findings"]), CANDIDATE_COUNT)
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["batch"], r["attempt"], r["exit_code"]) for r in retries],
+                         [(2, 1, 0), (3, 1, 0)], retries)
+        self.assertTrue(all(r["retried"] and r["parse_failure"] for r in retries))
+        self.assertIn("Could not parse", retries[0]["parse_failure"])
+        self.assertIn("schema", retries[1]["parse_failure"])
+        self.assertTrue((run / "schema_errors.batch3.attempt1.json").exists())
+        for batch, error in ((2, "Could not parse"), (3, "schema")):
+            retry_prompt = (run / f"prompt.batch{batch}.retry1.txt").read_text(encoding="utf-8")
+            self.assertIn(error, retry_prompt)
+            self.assertIn("Respond with ONLY one valid JSON report", retry_prompt)
+        calls = json.loads((run / "engine_calls.json").read_text(encoding="utf-8"))
+        self.assertEqual([(c["call"], c["attempt"]) for c in calls["calls"]],
+                         [(1, 1), (2, 1), (2, 2), (3, 1), (3, 2)])
 
     def test_a_batch_that_fails_twice_is_still_terminal(self):
         self.agent(AGENT_YAML)

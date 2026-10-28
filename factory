@@ -2411,12 +2411,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     _batch_tag = f".batch{_batch_index + 1}" if batched else ""
                     _batch_label = (f"engine '{engine}' batch {_batch_index + 1}/{len(prompts)}"
                                     if batched else f"engine '{engine}'")
-                    # agents-h53yp: ONE bounded retry of a batch that failed transiently (see
-                    # batch_retry_refusal). Before this, `if returncode != 0: break` meant a single
-                    # engine exit 1 with 0 bytes of output on batch 3 of 7 lost the station AND the
-                    # four batches that would have answered. A single-call station is untouched: its
+                    # agents-h53yp/4pwy0: ONE bounded retry of a failed batch (transient engine exit
+                    # or JSON/schema rejection). Otherwise a malformed batch 3 discards the valid
+                    # answers in batches 1 and 2 when the station-level retry starts from scratch.
+                    # A single-call station is untouched: its
                     # bounded retry already lives at the station level (run_station_with_repair_retry).
                     _attempts = BATCH_RETRY_ATTEMPTS if batched else 1
+                    _last_parse_failure = None
                     for _attempt in range(1, _attempts + 1):
                         if _attempt > 1:
                             # A retry is an extra engine call, so it is funded like a planned batch:
@@ -2437,6 +2438,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                       f"{_refund_calls} call(s) now)")
                         _call_label = (_batch_label if _attempt == 1
                                        else f"{_batch_label} retry {_attempt - 1}")
+                        _call_prompt = _batch_prompt
+                        if _attempt > 1 and _last_parse_failure:
+                            _call_prompt += ("\n\nYour previous answer for THIS batch was rejected: "
+                                             f"{_last_parse_failure[-600:]}. Respond with ONLY "
+                                             "one valid JSON report satisfying the schema; keep "
+                                             "the candidate IDs from this batch.")
+                            _write_run_artifact(run_dir / f"prompt{_batch_tag}.retry{_attempt - 1}.txt",
+                                                _call_prompt)
                         # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
                         # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
                         # with them the station. Each call gets its own allowance (the declaration,
@@ -2461,14 +2470,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             "candidates": (len(batches[_batch_index])
                                            if _batch_index < len(batches)
                                            and isinstance(batches[_batch_index], list) else None),
-                            "prompt_bytes": len(_batch_prompt.encode("utf-8")),
+                            "prompt_bytes": len(_call_prompt.encode("utf-8")),
                             "allowance_seconds": (_allowance if _allowance is not None else None),
                         }
                         try:
                             _res = run_station_command(
                                 adapter_cmd, budget, _call_label,
                                 timeout_seconds=_allowance,
-                                input=_batch_prompt, capture_output=True, text=True,
+                                input=_call_prompt, capture_output=True, text=True,
                                 check=False, env=adapter_env,
                                 on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
                                           if broker is not None else None))
@@ -2505,10 +2514,21 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                 _attempt_output = _produced.read_text(encoding="utf-8", errors="replace")
                                 _produced.rename(run_dir / f"model_output{_batch_tag}.txt")
                         adapter_res = _res
-                        if _res.returncode == 0 or not batched:
+                        _parse_failure = None
+                        if batched and _res.returncode == 0:
+                            # Check the SAME JSON repair and schema contract used by the final merge,
+                            # while this batch can still be retried without replaying prior answers.
+                            # Attempt-tagged evidence keeps the first rejected output inspectable.
+                            _parsed, _parse_failure = parse_station_report(
+                                _attempt_output, agent_dir=agent_dir, agent_cfg=agent_cfg,
+                                target_dir=target_dir, run_dir=run_dir,
+                                tag=f"{_batch_tag}.attempt{_attempt}")
+                        if not batched or (_res.returncode == 0 and _parse_failure is None):
                             break
-                        _refusal = batch_retry_refusal(_res.returncode, _res.stdout or "",
-                                                       _res.stderr or "", _attempt_output)
+                        _last_parse_failure = _parse_failure
+                        _refusal = (batch_retry_refusal(_res.returncode, _res.stdout or "",
+                                                        _res.stderr or "", _attempt_output)
+                                    if _res.returncode != 0 else None)
                         if _refusal is None and not budget_allows_another_call(budget):
                             _refusal = "no budget left for another engine call"
                         if _refusal is None and _attempt >= _attempts:
@@ -2520,17 +2540,19 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             "attempt": _attempt,
                             "exit_code": _res.returncode,
                             "output_bytes": len(_attempt_output.encode("utf-8")),
+                            "parse_failure": _parse_failure,
                             "stderr_tail": ((_res.stderr or "")[-400:] or None),
                             "retried": _refusal is None,
                             "not_retried_because": _refusal,
                         })
                         if _refusal is not None:
-                            print(f"  ⚠️ [batch-retry] batch {_batch_index + 1}/{len(prompts)} exited "
-                                  f"{_res.returncode}; NOT retried: {_refusal}")
+                            print(f"  ⚠️ [batch-retry] batch {_batch_index + 1}/{len(prompts)} "
+                                  f"{'failed JSON/schema validation' if _parse_failure else f'exited {_res.returncode}'}; "
+                                  f"NOT retried: {_refusal}")
                             break
-                        print(f"  🔁 [batch-retry] batch {_batch_index + 1}/{len(prompts)} exited "
-                              f"{_res.returncode} with no output; retrying it once "
-                              f"(attempt {_attempt + 1}/{_attempts})")
+                        print(f"  🔁 [batch-retry] batch {_batch_index + 1}/{len(prompts)} "
+                              f"{'failed JSON/schema validation' if _parse_failure else f'exited {_res.returncode} with no output'}; "
+                              f"retrying it once (attempt {_attempt + 1}/{_attempts})")
                     if adapter_res.returncode != 0:
                         # A failed call is the run's answer: later batches cannot rescue it, and
                         # carrying on would spend the budget on a session that already failed.
