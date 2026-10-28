@@ -526,6 +526,143 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             self.assertEqual(len(results), 0, f"Expected 0 findings due to is_scanner_file exclusion, got: {results}")
 
 
+class TestPythonEntryPointShapes(unittest.TestCase):
+    """agents-ombm8: the entry-point inventory must see Python listeners and spawns.
+
+    The scanner always WALKED .py files, but every ENTRY_POINT_PATTERNS regex was JS/TS-shaped, so
+    a Python target's attack surface came back EMPTY and the threat model was written from
+    silence (the nightly audit's finding on this repo's own language). These tests pin both halves
+    of the fix: the Python sinks that must be found, and the Python lookalikes that must stay
+    quiet - this scanner trades recall for precision (agents-55r), so the negative cases are the
+    ones that keep the inventory trustworthy.
+
+    Deliberate residual gaps (documented at the pattern table): Django urls.py `path(...)`/
+    `re_path(...)` (names too generic to match bare) and Go listeners/spawns.
+    """
+
+    def _scan(self, files):
+        """Scan a throwaway tree holding {rel_path: content}; auto-detection answers third-party
+        (no git identity), so no suppression is in play and the assertions are deterministic."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for rel, code in files.items():
+                fpath = tmp_path / rel
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                fpath.write_text(code, encoding="utf-8")
+            return mine_history.scan_entry_points(tmp_path)
+
+    def test_python_listeners_detected(self):
+        results = self._scan({
+            "src/flask_app.py": (
+                "from flask import Flask\n"
+                "app = Flask(__name__)\n"
+                "\n"
+                "@app.route('/api/items', methods=['POST'])\n"
+                "def create_item():\n"
+                "    return {}\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    app.run(host='0.0.0.0')\n"
+            ),
+            "src/fastapi_app.py": (
+                "from fastapi import APIRouter\n"
+                "router = APIRouter()\n"
+                "\n"
+                "@router.get('/items/{item_id}')\n"
+                "def read_item(item_id: int):\n"
+                "    return {}\n"
+                "\n"
+                "@router.patch('/items/{item_id}')\n"
+                "def amend_item(item_id: int):\n"
+                "    return {}\n"
+                "\n"
+                "@router.websocket('/ws')\n"
+                "async def ws(sock):\n"
+                "    pass\n"
+            ),
+            "src/stdlib_server.py": (
+                "from http.server import HTTPServer, BaseHTTPRequestHandler\n"
+                "import socketserver\n"
+                "from wsgiref.simple_server import make_server\n"
+                "\n"
+                "HTTPServer(('0.0.0.0', 8000), BaseHTTPRequestHandler).serve_forever()\n"
+                "socketserver.TCPServer(('127.0.0.1', 9000), BaseHTTPRequestHandler).serve_forever()\n"
+                "ThreadingHTTPServer(('127.0.0.1', 9001), BaseHTTPRequestHandler).serve_forever()\n"
+                "make_server('0.0.0.0', 8080, wsgi_app).serve_forever()\n"
+            ),
+            "src/asgi_run.py": (
+                "import uvicorn\n"
+                "from aiohttp import web\n"
+                "\n"
+                "uvicorn.run('app:app', host='0.0.0.0', port=443)\n"
+                "web.run_app(make_app(), port=8080)\n"
+            ),
+        })
+        by_file = {}
+        for r in results:
+            self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
+            by_file.setdefault(r["path"], []).append(r["line_number"])
+        self.assertEqual(by_file, {
+            "src/flask_app.py": [4, 9],
+            "src/fastapi_app.py": [4, 8, 12],
+            "src/stdlib_server.py": [5, 6, 7, 8],
+            "src/asgi_run.py": [4, 5],
+        }, f"every Python listener shape must be inventoried exactly once, got: {results}")
+
+    def test_python_spawns_detected(self):
+        results = self._scan({
+            "src/runner.py": (
+                "import asyncio\n"
+                "import os\n"
+                "import subprocess\n"
+                "\n"
+                "def run_all(cmd):\n"
+                "    subprocess.run(cmd, shell=True)\n"
+                "    subprocess.Popen(cmd)\n"
+                "    subprocess.check_output(cmd)\n"
+                "    os.system(cmd)\n"
+                "    os.popen(cmd).read()\n"
+                "    os.execv('/bin/echo', ['x'])\n"
+                "    os.posix_spawn('/bin/echo', [], {})\n"
+                "    return asyncio.create_subprocess_shell(cmd)\n"
+            ),
+        })
+        self.assertEqual(
+            [(r["category"], r["line_number"]) for r in results],
+            [("code-execution", n) for n in range(6, 14)],
+            f"every Python spawn shape must be inventoried exactly once, got: {results}")
+
+    def test_python_lookalikes_stay_quiet(self):
+        """Precision half: ordinary Python must not enter the attack-surface inventory.
+
+        `@mock.patch('os.system')` is the pinned false-positive trap: without the receiver
+        exclusion, every production module carrying an inline test double would grow a phantom
+        PATCH route, and the string inside the decorator is not an `os.system(` CALL.
+        """
+        results = self._scan({
+            "src/ordinary.py": (
+                "import functools\n"
+                "import os\n"
+                "from unittest import mock\n"
+                "\n"
+                "@functools.lru_cache(maxsize=None)\n"
+                "def helper():\n"
+                "    home = os.environ.get('HOME', '')\n"
+                "    return os.path.join(home, 'x')\n"
+                "\n"
+                "class Config:\n"
+                "    @property\n"
+                "    def value(self):\n"
+                "        return self._items.get('k')\n"
+                "\n"
+                "@mock.patch('os.system')\n"
+                "def with_fake_system(m):\n"
+                "    pass\n"
+            ),
+        })
+        self.assertEqual(results, [], f"Python lookalikes are not sinks, got: {results}")
+
+
 class TestSelfTargetRepositoryIdentity(unittest.TestCase):
     """agents-32twc: self-target identity is the REPOSITORY, not the running installation's path.
 
