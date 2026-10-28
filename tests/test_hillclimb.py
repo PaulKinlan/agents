@@ -497,6 +497,32 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self.assertIn('src="a.js" defer', patch)
         self.assertIn('src="b.js" defer', patch)
 
+    def test_timed_out_worktree_creation_after_add_cleans_hillclimb_registration(self):
+        """A StationTimeout must enter the same tombstoned cleanup as StationError."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+
+        def create_then_timeout(target_dir, worktree_dir):
+            subprocess.run(["git", "worktree", "add", "--detach", str(worktree_dir)],
+                           cwd=target_dir, check=True, capture_output=True, text=True)
+            raise factory_cli.StationTimeout("worktree add timed out after registering")
+
+        with mock.patch.object(factory_cli, "_create_session_worktree",
+                               side_effect=create_then_timeout):
+            result = factory_cli.run_hillclimb(
+                str(target), goal_metric="perf_hazard_score", goal_value=0,
+                iterations=1, apply_edits=True, engine_arg="pi")
+        self.assertFalse(result)
+        self.assertEqual(self._ledger()[-1]["outcome"], "BLOCKED")
+        worktrees = target / ".git" / "worktrees"
+        self.assertEqual(list(worktrees.glob("*")) if worktrees.exists() else [], [])
+        self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
+        from lib.retention import LEDGER_NAME
+        ledger = self.tmp / "factory-root" / LEDGER_NAME
+        tombstones = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+                      if line.strip()]
+        self.assertEqual(len(tombstones), 1)
+        self.assertEqual(tombstones[0]["reason"], "apply-worktree-failure")
+
     def test_create_session_worktree_prunes_stale_registration_and_retries(self):
         """P3 fix (agents-janc): stale worktree registration triggers git worktree prune and succeeds."""
         target = self._git_target({"index.html": BLOCKING_HTML})
@@ -542,13 +568,13 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         events = []
         real_run_git = factory_cli._run_git
 
-        def fake_run_git(cmd, cwd=None):
+        def fake_run_git(cmd, cwd=None, **kwargs):
             if "worktree" in cmd and "add" in cmd:
                 events.append("git")
                 if events.count("git") == 1:
                     # First attempt simulates transient lock collision
                     return subprocess.CompletedProcess(cmd, 128, "", "fatal: Unable to create '.git/index.lock': File exists.")
-            return real_run_git(cmd, cwd)
+            return real_run_git(cmd, cwd, **kwargs)
 
         def record_sleep(*_args, **_kwargs):
             events.append("sleep")
@@ -569,15 +595,90 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
                     "window are ignored, not counted (agents-2ayl): " + repr(events))
         factory_cli._remove_session_worktree(target, wt_dir)
 
+    def test_git_command_timeout_uses_the_callers_bound(self):
+        """The worktree-specific limit reaches subprocess.run, not only the wrapper."""
+        observed = []
+
+        def expire(cmd, **kwargs):
+            observed.append(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        with mock.patch.object(factory_cli.subprocess, "run", side_effect=expire):
+            result = factory_cli._run_git(["worktree", "add"], self.tmp,
+                                          timeout_seconds=factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS)
+        self.assertEqual(observed, [factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS])
+        self.assertEqual(result.returncode, 124)
+        self.assertIn(f"timed out after {observed[0]}s", result.stderr)
+
+    def test_timed_out_worktree_add_is_bounded_and_degrades_without_halting_line(self):
+        """agents-nf54e: a stalled checkout is a station timeout, not a line-halting error."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        worktree = self.tmp / "stalled-worktree"
+        attempts = []
+
+        def stalled_add(args, cwd, **kwargs):
+            attempts.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 124, "", "index.lock; git command timed out")
+
+        with mock.patch.object(factory_cli, "_run_git", side_effect=stalled_add):
+            with self.assertRaises(factory_cli.StationTimeout) as caught:
+                factory_cli._create_session_worktree(target, worktree)
+        self.assertIn("git worktree add exited 124", str(caught.exception))
+        self.assertEqual(len(attempts), 1, "timeouts must not retry and consume the station budget")
+        self.assertEqual(attempts[0][1]["timeout_seconds"],
+                         factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS)
+        self.assertLessEqual(factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS, 30)
+        self.assertLessEqual(factory_cli.GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS, 10)
+
+    def test_cleanup_removes_a_locked_partial_worktree_registration(self):
+        """agents-nf54e review P2: prune skips locked admin state after a timed-out add."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        for missing_directory in (False, True):
+            with self.subTest(missing_directory=missing_directory):
+                worktree = self.tmp / f"partial-locked-worktree-{missing_directory}"
+                factory_cli._create_session_worktree(target, worktree)
+                subprocess.run(["git", "worktree", "lock", str(worktree)], cwd=target,
+                               check=True, capture_output=True, text=True)
+                if missing_directory:
+                    shutil.rmtree(worktree)  # a timed-out checkout may leave admin state only
+                one_force = subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
+                                           cwd=target, capture_output=True, text=True)
+                self.assertNotEqual(one_force.returncode, 0,
+                                    "the fixture must reproduce the single-force cleanup failure")
+                factory_cli._remove_session_worktree(target, worktree)
+                self.assertFalse(worktree.exists())
+                registered = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=target,
+                                            check=True, capture_output=True, text=True).stdout
+                self.assertNotIn(str(worktree), registered,
+                                 "cleanup must remove locked admin registration, not just the directory")
+
+    def test_worktree_cleanup_caps_both_git_commands_after_timeout(self):
+        """A partial checkout must not turn best-effort cleanup into two 120s waits."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        worktree = self.tmp / "partial-worktree"
+        worktree.mkdir()
+        calls = []
+
+        def stalled_cleanup(args, cwd, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 124, "", "git command timed out")
+
+        with mock.patch.object(factory_cli, "_run_git", side_effect=stalled_cleanup):
+            factory_cli._remove_session_worktree(target, worktree)
+        self.assertEqual([args[1] for args, _ in calls], ["remove", "prune"])
+        self.assertTrue(all(kwargs["timeout_seconds"] == factory_cli.GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS
+                            for _, kwargs in calls))
+        self.assertFalse(worktree.exists(), "the local partial directory must be removed")
+
     def test_create_session_worktree_raises_loud_error_on_persistent_failure(self):
         """P3 fix (agents-janc): persistent failure raises StationError naming the exit code and stderr."""
         target = self._git_target({"index.html": BLOCKING_HTML})
         wt_dir = self.tmp / "disposable_worktree_fail"
 
-        def fail_run_git(cmd, cwd=None):
+        def fail_run_git(cmd, cwd=None, **kwargs):
             if "worktree" in cmd and "add" in cmd:
                 return subprocess.CompletedProcess(cmd, 128, "", "fatal: corrupt git repository")
-            return factory_cli._run_git(cmd, cwd)
+            return factory_cli._run_git(cmd, cwd, **kwargs)
 
         with mock.patch.object(factory_cli, "_run_git", side_effect=fail_run_git):
             with self.assertRaises(factory_cli.StationError) as ctx:
