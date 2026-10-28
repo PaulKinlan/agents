@@ -845,8 +845,13 @@ class TestPinFailureDegradation(unittest.TestCase):
             # attempt fails ENXIO and the thread exits); under the mutation the reader is
             # blocked in open() waiting for exactly this writer, so one attempt lands. A
             # single non-blocking open would race the reader's scheduling.
+            # agents-81o6f: a monotonic DEADLINE, not an iteration count. 30 x 0.1 s is 3 s of retries
+            # only if every sleep takes exactly 100 ms; on a loaded box a thread can be descheduled for
+            # far longer between iterations, so the writer's lifetime was unbounded in wall-clock terms
+            # while the assertion below waited on it with a fixed 5 s join.
             fd = None
-            for _ in range(30):
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
                 try:
                     fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
                     break
@@ -868,8 +873,18 @@ class TestPinFailureDegradation(unittest.TestCase):
             self.assertIn("FIFO", sandbox_unavailable_reason())
         finally:
             feeder.join(timeout=5)
+        # agents-81o6f: WAIT for the feeder to finish rather than asserting the instant a 5 s join gives
+        # up. The writer's own lifetime is now deadline-bounded (3 s of retries) but it can be descheduled
+        # arbitrarily on a loaded box, and when that happened this assertion failed on a CORRECT
+        # implementation - the same instantaneous-assert-on-a-race shape as the budget test filed with it.
+        # Bounded wait, then fail with a message that says which deadline expired.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and feeder.is_alive():
+            time.sleep(0.02)
         self.assertFalse(feeder.is_alive(),
-                         "the probe must REFUSE the FIFO, never block on it")
+                         "the probe must REFUSE the FIFO, never block on it: the feeder was still retrying "
+                         "20 s after the probe returned, so a reader may be blocked in open() "
+                         "(agents-81o6f)")
 
     def test_a_device_file_where_the_pins_file_is_expected_degrades(self):
         """The unbounded-read sibling (/dev/null stands in for /dev/urandom, which must
