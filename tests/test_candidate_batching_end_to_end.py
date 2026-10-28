@@ -376,6 +376,18 @@ class TestBoundedBatching(BatchedStation):
         self.assertFalse(list(run.glob("prompt.batch*.txt")),
                          f"{CANDIDATE_COUNT} candidates under a bound of 8 must not split the call")
         self.assertTrue((run / "prompt.txt").exists())
+        # agents-8ja8b: THE WIRING, not just the arithmetic. A single-call station used to pass no allowance
+        # at all (the caller's `... if batched else None`), so run_station_command fell back to
+        # timeout_for() - the raw remaining deadline - and the engine could spend the reserve the findings
+        # dispatch behind it needs. The plan artifact records what each call was GIVEN, so a null here is
+        # exactly the defect: it says the station never computed a share for its only call.
+        evidence = json.loads((run / "engine_calls.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(evidence["calls"]), 1, evidence["calls"])
+        self.assertIsNotNone(
+            evidence["calls"][0]["allowance_seconds"],
+            "a single-call station must still record the allowance its call was given; None here means the "
+            "engine was handed the whole remaining deadline and the findings dispatch had no reserve "
+            "(agents-8ja8b)")
 
 
 # agents-gwucz: TWO candidates against a bound of EIGHT. The count fits, the BYTES do not (7 KB each

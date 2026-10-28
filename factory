@@ -2415,8 +2415,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         # with them the station. Each call gets its own allowance (the declaration,
                         # reduced to a fair share when the ceiling or a slow earlier call leaves less),
                         # and the last one leaves the findings dispatch its reserve.
-                        _allowance = (budget.call_timeout(_call_label, len(prompts) - _batch_index)
-                                      if batched else None)
+                        # agents-8ja8b: EVERY call, including a single-call station's only call. This
+                        # used to read `... if batched else None`, and None meant run_station_command fell
+                        # back to budget.timeout_for() - the RAW remaining deadline, with no reserve
+                        # subtracted. A station with one engine call and a findings dispatch after it
+                        # therefore let the engine spend the dispatch's time: reported from
+                        # chrome-status-lite, where qa-station timed out with 4.88 s left for findings
+                        # dispatch. `calls_left` is never below 1, so the batched arithmetic is unchanged.
+                        _allowance = budget.call_timeout(_call_label, max(1, len(prompts) - _batch_index))
                         # agents-zwq8l: record what this call WAS GIVEN and what it COST, per call. A
                         # starved allowance and a genuinely slow call produce the same timeout message,
                         # and telling them apart used to need another instrumented nightly.
