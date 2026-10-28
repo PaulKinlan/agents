@@ -6,6 +6,7 @@ import importlib.util
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -500,6 +501,10 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
         cfg = load_yaml(ROOT / "agents" / "deps-supply-chain" / "agent.yaml")
         declared_seconds = float(cfg["budget"]["max_minutes"]) * 60
         self.assertGreater(audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 0)
+        self.assertLessEqual(audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 30,
+                             "npm registry stalls must release the engine budget promptly")
+        self.assertGreaterEqual(declared_seconds - audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 240,
+                                "an npm-only timeout must leave at least 240s for the engine")
         self.assertGreater(audit_deps.PIP_AUDIT_TIMEOUT_SECONDS, 0)
         # Worst case (polyglot target running BOTH audits) must stay inside the declared
         # station budget, which the pre-pass shares with the engine and findings dispatch.
@@ -549,6 +554,30 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
                 "npm-audit-unavailable",
                 [c.get("rule_id") for c in candidates],
             )
+
+    def test_real_hung_npm_audit_expires_before_it_can_finish(self):
+        """agents-tnm51: exercise the real process deadline, not just mocked kwargs.
+
+        A direct Python child writes a marker only after its slow response. A short
+        test-only bound must kill it before that write, then emit a coverage gap.
+        No wall-clock assertion depends on the host scheduler.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._write_package_json(repo)
+            marker = repo / "audit-finished"
+            fake_npm = repo / "npm-stub"
+            fake_npm.write_text(
+                f"#!{sys.executable}\nimport time\nfrom pathlib import Path\n"
+                f"time.sleep(3)\nPath({str(marker)!r}).write_text('finished')\n",
+                encoding="utf-8",
+            )
+            fake_npm.chmod(0o755)
+            with mock.patch.object(audit_deps, "_npm_binary", return_value=str(fake_npm)), \
+                 mock.patch.object(audit_deps, "NPM_AUDIT_TIMEOUT_SECONDS", 0.2):
+                candidates, _ = audit_deps.audit_npm(repo)
+            self.assertFalse(marker.exists(), "the npm child must not reach its late result")
+            self.assertIn("npm-audit-unavailable", [c.get("rule_id") for c in candidates])
 
     def test_pip_audit_subprocess_carries_the_inner_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:

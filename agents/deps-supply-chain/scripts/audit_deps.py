@@ -33,10 +33,12 @@ from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
 # group, and the audit produced no verdict at all (paul-kinlan-me audit, log:265). Same
 # pathology and convention as the gitleaks bound in secret-scan (fleet-wa8) and the git index
 # bound in docs-drift: bounded well under the station budget, and expiry degrades to the
-# coverage-gap candidate instead of losing the station. Each command gets 120s (the repo's
-# inner-bound convention); both together stay under the 5-minute station even on a polyglot
-# target that runs npm AND pip audits.
-NPM_AUDIT_TIMEOUT_SECONDS = 120
+# coverage-gap candidate instead of losing the station. npm audit gets 30s: the previous
+# 120s bound consumed too much of the shared five-minute deadline before the engine could
+# triage candidates. pip-audit retains its independent 120s bound; a polyglot target can
+# still use more than the engine's ideal reserve, so this is the npm-only path's fix,
+# not a separate guaranteed pre-pass/engine budget allocation.
+NPM_AUDIT_TIMEOUT_SECONDS = 30
 PIP_AUDIT_TIMEOUT_SECONDS = 120
 
 
