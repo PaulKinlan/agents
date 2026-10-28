@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import stat
@@ -24,6 +25,20 @@ from lib.sandbox import sandbox_available
 from lib.tool_pins import ToolPinError
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
+
+# `factory integrate` measured 4.8s standalone on this VM; the old per-call bound was 10s - roughly
+# 2x a quiet-box figure with nothing for gate load - and it reddened a healthy full gate
+# (agents-c9t7h). The bound is now ONE constant sized from the measurement, the policy
+# tests/test_sinks.py established (agents-g4cq9/0qyjo): 45s covers 4x the worst measured run plus
+# the +42% in-gate contention penalty measured on this VM, with room to spare. It is a hang guard,
+# not a sleep - a generous bound only delays detecting a real hang. If the ~2s CLI startup cost
+# ever lands, lower it HERE, in one place.
+_CLI_GUARD_S = 45
+
+# The worst standalone measurement behind _CLI_GUARD_S, kept as its own number so the guard below
+# fails with the measurement in the message rather than with an opinion.
+_WORST_MEASURED_CLI_S = 4.8
+
 loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY_ROOT / "factory"))
 spec = importlib.util.spec_from_loader("factory_cli", loader)
 factory_cli = importlib.util.module_from_spec(spec)
@@ -77,7 +92,7 @@ class TestDrainingReportStub(unittest.TestCase):
                         ["bash", "-o", "pipefail", "-c",
                          '"$1" -c \'import sys; sys.stdout.write("x"*200000)\' | "$2"',
                          "bash", sys.executable, str(stub)],
-                        capture_output=True, text=True, timeout=10, check=False)
+                        capture_output=True, text=True, timeout=_CLI_GUARD_S, check=False)
                     self.assertEqual(res.returncode, 0, res.stderr)
                     self.assertIn(f"{engine.upper()}-RAN", res.stdout)
                     self.assertEqual(json.loads(res.stdout.splitlines()[-1])["summary"], "stub")
@@ -939,7 +954,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
         env.update(env_overrides)
         return subprocess.run(
             ["bash", str(adapter), "probe", str(target), str(tmp), str(run_dir)],
-            input=prompt, capture_output=True, text=True, env=env, timeout=60,
+            input=prompt, capture_output=True, text=True, env=env, timeout=_CLI_GUARD_S,
         ), run_dir
 
     def test_canned_claude_report_drains_a_large_adapter_prompt(self):
@@ -1025,7 +1040,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
 
             res = subprocess.run(
                 ["bash", str(adapter), "probe", str(tmp), str(tmp), str(run_dir)],
-                input="prompt", capture_output=True, text=True, env=env, timeout=60,
+                input="prompt", capture_output=True, text=True, env=env, timeout=_CLI_GUARD_S,
             )
 
             self.assertEqual(res.returncode, 3)
@@ -1060,7 +1075,7 @@ class TestAgentIntegrationInstructions(unittest.TestCase):
     def test_factory_agent_flag(self):
         res = subprocess.run(
             [sys.executable, str(FACTORY_ROOT / "factory"), "--agent"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=_CLI_GUARD_S
         )
         self.assertEqual(res.returncode, 0)
         self.assertIn("# The Software Factory — Integration & Automation Guide", res.stdout)
@@ -1070,7 +1085,7 @@ class TestAgentIntegrationInstructions(unittest.TestCase):
     def test_factory_integrate_subcommand(self):
         res = subprocess.run(
             [sys.executable, str(FACTORY_ROOT / "factory"), "integrate", "--section", "github-actions"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=_CLI_GUARD_S
         )
         self.assertEqual(res.returncode, 0)
         self.assertIn("## 1. CI/CD Plane: GitHub Actions", res.stdout)
@@ -1141,6 +1156,36 @@ class ToolPinsRunDecisionTests(unittest.TestCase):
                 mock.patch.object(sys, "argv", ["factory", "list"]):
             factory_cli.main()
         decided.assert_called_once_with(None)
+
+
+class TestTimeoutPolicy(unittest.TestCase):
+    """Bounds in this file are sized from measurement, once, in a single constant (agents-c9t7h).
+
+    The same drift tests/test_sinks.py guards: per-call literals quietly became opinions, and the
+    tightest one reddened a full gate on a merely-busy box."""
+
+    def test_no_literal_timeout_remains_in_this_file(self):
+        """A reintroduced literal is how a file ends up with several bounds for the same CLI."""
+        source = (FACTORY_ROOT / "tests" / "test_factory_core.py").read_text(encoding="utf-8")
+        # COUNT CODE, NOT PROSE (the agents-kevst lesson): only full-line comments are dropped, so a
+        # literal quoted in a TRAILING comment still trips the scan - noise on the side that protects
+        # the bound. The pattern is [0-9.]+ rather than integer-only: a float literal is the same
+        # drift with different punctuation.
+        code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+        literals = re.findall(r"timeout=([0-9.]+)", code)
+        self.assertEqual(
+            literals, [],
+            "every subprocess bound in this file must use _CLI_GUARD_S; found literal timeout(s) "
+            f"{literals} - re-inlining one is how tests/test_sinks.py ended up with three bounds for "
+            "the same CLI (agents-0qyjo)")
+
+    def test_the_guard_still_covers_the_worst_measured_run(self):
+        """Not a number chosen for looks: it is a multiple of a measurement, and the message says which."""
+        self.assertGreaterEqual(
+            _CLI_GUARD_S, 3 * _WORST_MEASURED_CLI_S,
+            f"_CLI_GUARD_S={_CLI_GUARD_S} has less than 3x headroom over the worst measured standalone "
+            f"run of the factory CLI ({_WORST_MEASURED_CLI_S}s); the gate reddens on a busy box long "
+            "before a real hang, which is what agents-c9t7h was")
 
 
 if __name__ == "__main__":

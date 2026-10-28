@@ -7,6 +7,7 @@ import io
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
+import re
 import subprocess
 import sys
 import unittest
@@ -17,6 +18,18 @@ from unittest import mock
 from tests.test_sinks import REPO, SinkFixture
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# The promote CLI measured 28.0s standalone (33s wall) on this VM, against a bound of 30s: SEVEN
+# PERCENT headroom, a coin toss under any gate load (agents-c9t7h). The bound is now ONE constant
+# sized from the measurement, the policy tests/test_sinks.py established (agents-g4cq9/0qyjo):
+# 120s is 4x the worst measured run plus the contention allowance this VM measured (+42% in-gate).
+# It is a hang guard, not a sleep - a generous bound only delays detecting a real hang. If the
+# promote path ever gets fast, lower it HERE, in one place.
+_CLI_GUARD_S = 120
+
+# The worst standalone measurement behind _CLI_GUARD_S, kept as its own number so the guard below
+# fails with the measurement in the message rather than with an opinion.
+_WORST_MEASURED_CLI_S = 28.0
 
 
 class TestPromotion(SinkFixture, unittest.TestCase):
@@ -53,7 +66,7 @@ class TestPromotion(SinkFixture, unittest.TestCase):
                "--promote-issue", issue_url or self.issue_url]
         env = dict(self.env, SINK_ALLOW_BD="1", **(extra_env or {}))
         return subprocess.run(cmd, cwd=self.factory, env=env, capture_output=True,
-                              text=True, check=False, timeout=30)
+                              text=True, check=False, timeout=_CLI_GUARD_S)
 
     def writes(self, tool, operation):
         return [c for c in self.calls() if c["tool"] == tool
@@ -228,7 +241,7 @@ class TestPromotion(SinkFixture, unittest.TestCase):
                  for _ in range(2)]
         try:
             for proc in procs:
-                out, err = proc.communicate(timeout=45)
+                out, err = proc.communicate(timeout=_CLI_GUARD_S)
                 self.assertEqual(proc.returncode, 0, out + err)
         finally:
             for proc in procs:
@@ -284,6 +297,35 @@ class TestPromotion(SinkFixture, unittest.TestCase):
         sig = inspect.signature(promote_issue)
         self.assertIn("store", sig.parameters, "promote_issue must accept store as a keyword argument")
         self.assertIsNone(sig.parameters["store"].default, "store must default to None")
+
+
+class TestTimeoutPolicy(unittest.TestCase):
+    """Bounds in this file are sized from measurement, once, in a single constant (agents-c9t7h).
+
+    The same drift tests/test_sinks.py guards: per-call literals quietly became opinions, and the
+    tightest one reddened a full gate on a merely-busy box."""
+
+    def test_no_literal_timeout_remains_in_this_file(self):
+        """A reintroduced literal is how a file ends up with several bounds for the same CLI."""
+        source = (ROOT / "tests" / "test_promotion.py").read_text(encoding="utf-8")
+        # COUNT CODE, NOT PROSE (the agents-kevst lesson): only full-line comments are dropped, so a
+        # literal quoted in a TRAILING comment still trips the scan. The pattern is [0-9.]+ rather
+        # than integer-only: a float literal is the same drift with different punctuation.
+        code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
+        literals = re.findall(r"timeout=([0-9.]+)", code)
+        self.assertEqual(
+            literals, [],
+            "every subprocess bound in this file must use _CLI_GUARD_S; found literal timeout(s) "
+            f"{literals} - re-inlining one is how tests/test_sinks.py ended up with three bounds for "
+            "the same CLI (agents-0qyjo)")
+
+    def test_the_guard_still_covers_the_worst_measured_run(self):
+        """Not a number chosen for looks: it is a multiple of a measurement, and the message says which."""
+        self.assertGreaterEqual(
+            _CLI_GUARD_S, 3 * _WORST_MEASURED_CLI_S,
+            f"_CLI_GUARD_S={_CLI_GUARD_S} has less than 3x headroom over the worst measured standalone "
+            f"run of the promote CLI ({_WORST_MEASURED_CLI_S}s); the gate reddens on a busy box long "
+            "before a real hang, which is what agents-c9t7h was")
 
 
 if __name__ == "__main__":
