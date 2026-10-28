@@ -380,7 +380,23 @@ def _parse_resolutions(stdout, rc):
     return {path: suites | always for path, suites in mapping.items()}
 
 
+# agents-4jqna: ONE bound for every `tools/fast-gate.sh` query in this file, because it had THREE separate
+# 60 s opinions about the same invocation and the tightest plausible load broke all of them.
+#
+# MEASURED on this VM at load 6.37, the batch resolve (23 lib modules, one call - already memoised by
+# agents-y2b2): 42.70 s, 50.60 s, 42.70 s. That is 18% headroom under the old 60 s. At load 20.8 the same call
+# exceeded it and this module ERRORED with subprocess.TimeoutExpired, reddening the gate for a delta that does
+# not touch the gate - and this module is part of the gate's own coverage contract, so it fails on itself.
+# The cost being bounded is not this test's work: it is gate STARTUP (a fixed per-invocation cost, measured at
+# 73 processes before agents-d0yky's cuts and 20 after) multiplied by load on a 2-vCPU box ten lanes share.
+# 240 s is ~5x the quiet measurement, which is the multiple that survived the +42% in-gate contention penalty
+# measured elsewhere on this box (agents-0qyjo) with room for the 4x load that broke the old number.
+_GATE_QUERY_TIMEOUT_S = 240
+
+
 @functools.lru_cache(maxsize=None)
+
+
 def _batch_resolutions(root=None):
     """THE MAPPING OF EVERY lib/ MODULE, FROM ONE GATE INVOCATION (agents-wzmj, F1).
 
@@ -409,7 +425,7 @@ def _batch_resolutions(root=None):
         text=True,
         env={**os.environ, "GIT_CHANGED": "\n".join(paths), "FAST_GATE_RESOLVE_PATHS": "1",
              "FAST_GATE_DRY_RUN": "1"},
-        timeout=60,
+        timeout=_GATE_QUERY_TIMEOUT_S,
     )
     return _parse_resolutions(proc.stdout, proc.returncode)
 
@@ -436,7 +452,7 @@ def _selected_suites(module_path, root=None):
         capture_output=True,
         text=True,
         env={**os.environ, "GIT_CHANGED": module_path, "FAST_GATE_DRY_RUN": "1"},
-        timeout=60,
+        timeout=_GATE_QUERY_TIMEOUT_S,
     )
     out = proc.stdout + proc.stderr
     return {ln.strip() for ln in out.splitlines() if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
@@ -802,7 +818,7 @@ class TestTheResolveModeAnswersManyPathsInOneInvocation(unittest.TestCase):
             path = f"lib/{module}.py"
             proc = subprocess.run(
                 ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
-                env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=60,
+                env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=_GATE_QUERY_TIMEOUT_S,
             )
             union = {ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
                      if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
