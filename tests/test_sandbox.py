@@ -27,6 +27,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -47,6 +48,26 @@ def _pairs(argv, flag):
         if item == flag:
             out.append((argv[i + 1], argv[i + 2]))
     return out
+
+
+class TestAvailabilityProbeSession(unittest.TestCase):
+    def test_ephemeral_probe_stays_in_callers_session(self):
+        """agents-5npvu: a timed-out availability probe must not detach orphan children.
+
+        Spy at the process boundary so the test works even on hosts unable to run bwrap;
+        runtime sandbox wraps separately retain their new-session isolation.
+        """
+        completed = subprocess.CompletedProcess(["bwrap"], 0, b"", b"")
+        with mock.patch.object(sandbox_module, "_resolve_bwrap", return_value="/usr/bin/bwrap"), \
+             mock.patch.object(sandbox_module.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(sandbox_module._probe())
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "/usr/bin/bwrap")
+        self.assertIn("--die-with-parent", argv)
+        self.assertNotIn("--new-session", argv,
+                         "an ephemeral probe must not detach from its caller's process group")
+        self.assertEqual(argv[-2:], ["--", "/bin/true"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
 
 
 @unittest.skipUnless(LIVE, "sandbox_command() exercises every wrap, so these need a real bwrap")
