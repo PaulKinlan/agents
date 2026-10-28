@@ -139,6 +139,41 @@ class TestBatchedCallPlanning(unittest.TestCase):
         clock.now = 2000                   # 100 s left of the 35-minute deadline
         self.assertEqual(budget.call_timeout("engine 'pi' batch 7/7", 1), 70)
 
+    def test_a_SINGLE_call_station_also_leaves_the_findings_dispatch_its_reserve(self):
+        """agents-8ja8b: the reserve is not a batched-only guarantee.
+
+        A station with ONE engine call used to reach the engine with no allowance at all (the caller
+        passed None, so run_station_command fell back to timeout_for() - the raw remaining deadline), which
+        let the engine spend the reserve that the findings dispatch behind it needs. Reported from
+        chrome-status-lite: qa-station timed out with 4.88 s left for findings dispatch.
+
+        Arithmetic checked here rather than described: with 100 s left of a 300 s declaration the reserve is
+        30 s (10% of the declaration, capped at 30), so the single call may have 70 and the dispatch keeps
+        the rest. timeout_for() still sees the whole 100 - the dispatch is the step that is SUPPOSED to get
+        everything left.
+        """
+        clock = FakeClock()
+        budget = StationBudget(5, clock=clock)      # declared 300 s; no plan_calls: a single-call station
+        clock.now = 200                             # 100 s left
+        self.assertEqual(budget.call_timeout("engine 'pi'", 1), 70,
+                         "the single call must be the remaining time MINUS the post-engine reserve")
+        self.assertEqual(budget.timeout_for("findings dispatch"), 100,
+                         "the dispatch itself is not reserve-limited; it gets what is left")
+
+    def test_a_single_call_still_reserves_even_with_the_whole_declaration_left(self):
+        """The reserve is subtracted from the FIRST second, not only from what is left near the end.
+
+        I wrote this test asserting 300 (the declaration, unshortened) and it failed with 270 - the CODE was
+        right and my expectation was wrong, so the assertion is what changed. 270 = 300 - 30 is the intended
+        behaviour and worth pinning: leaving the reserve only when time is short would leave the findings
+        dispatch unprotected on exactly the runs that need it most (a station whose engine finishes early).
+        It also states the cost of this fix plainly: a single-call station's engine phase is now 10% shorter
+        (capped at 30 s), which is the trade for a dispatch that always has time."""
+        budget = StationBudget(5, clock=FakeClock())
+        self.assertEqual(budget.call_timeout("engine 'pi'", 1), 270)
+        self.assertEqual(budget.timeout_for("findings dispatch"), 300,
+                         "the step behind the engine still sees the whole declaration")
+
     def test_an_exhausted_deadline_still_raises_before_a_call(self):
         clock = FakeClock()
         budget = StationBudget(1, clock=clock)
