@@ -428,6 +428,17 @@ def _batch_resolutions(root=None):
     """
     root = root or ROOT
     paths = [f"lib/{module}.py" for module in _lib_modules(root)]
+    return _resolve_batch(paths, root)
+
+
+def _resolve_batch(paths, root=None):
+    """One gate startup resolving an ARBITRARY path collection (the worker behind _batch_resolutions).
+
+    Uncached on purpose: each caller owns its own entry point and path set (the lib-module walk via
+    _batch_resolutions, the agents-1v6ap cross-class sample via its test), so one startup per set is
+    paid exactly once per module run and no cache key can silently mix the two contracts.
+    """
+    root = root or ROOT
     if not paths:
         return {}
     proc = subprocess.run(
@@ -440,6 +451,21 @@ def _batch_resolutions(root=None):
         timeout=_GATE_CLI_GUARD_S,
     )
     return _parse_resolutions(proc.stdout, proc.returncode)
+
+
+def _raw_dry_run_union(path, root=None):
+    """What the UNION dry run selects when `path` alone is the change set - the raw side of THE
+    EQUIVALENCE. Deliberately NOT routed through _selected_suites or _batch_resolutions: the
+    equivalence is only a measurement while its two sides are independent mechanisms - a raw side
+    answered from the batch record would make the test batch-versus-batch, which cannot fail on a
+    record defect (agents-1v6ap)."""
+    root = root or ROOT
+    proc = subprocess.run(
+        ["bash", "tools/fast-gate.sh"], cwd=root, capture_output=True, text=True,
+        env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=_GATE_CLI_GUARD_S,
+    )
+    return {ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
+            if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
 
 
 @functools.lru_cache(maxsize=None)
@@ -829,14 +855,45 @@ class TestTheResolveModeAnswersManyPathsInOneInvocation(unittest.TestCase):
                          "the mode is inert and the caller is silently on the slow path again")
         for module in modules[:5]:
             path = f"lib/{module}.py"
-            proc = subprocess.run(
-                ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
-                env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=_GATE_CLI_GUARD_S,
-            )
-            union = {ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
-                     if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
-            self.assertEqual(union, batch[path],
+            self.assertEqual(_raw_dry_run_union(path), batch[path],
                              f"the batch answer for {path} must be what the union dry run selects")
+
+    # agents-1v6ap: the cross-class equivalence sample. The lib/ modules sampled by the pin above carry
+    # NEITHER a retention add-on NOR a self-run in their records - the very components agents-kw7wl
+    # changed (a record became the path's OWN suites + retention add-on + self-run, and the ':always'
+    # line dropped $run to tiers only). A record-vs-raw divergence on tools/ or tests/ paths was
+    # invisible to this module, because its content pins read THROUGH the cache. Each sample carries a
+    # record component the lib class lacks:
+    #   tools/fast-gate.sh      - retention add-on (tools class) on the gate's own multi-suite arm
+    #   tools/red-first.sh      - retention add-on on a .sh path outside tests/
+    #   tests/test_red_first.py - self-run: the record must carry the changed file itself (run=$f)
+    # Measured cost of the pin: one batch startup (3.8s) + three raw dry runs (~3s each) on a quiet
+    # box; agents/*.py was left out of the sample deliberately - it would add ~3s to this always-on
+    # suite to carry the SAME retention add-on tools/red-first.sh already pins, through an arm whose
+    # mapped-set semantics are the lib class's own.
+    _CROSS_CLASS_SAMPLE = ("tools/fast-gate.sh", "tools/red-first.sh", "tests/test_red_first.py")
+
+    def test_the_batch_answer_equals_the_per_path_dry_run_across_record_classes(self):
+        """THE EQUIVALENCE beyond lib/ (agents-1v6ap): for the classes whose record content agents-kw7wl
+        changed, the batch record plus ':always' must equal what the union dry run selects for the path
+        alone. The marker assertions below are what make this a measurement of THOSE classes: without
+        the retention add-on and the self-run actually riding in the records, the equalities would
+        degrade to the lib-class semantics the pin above already covers - two sets agreeing because
+        neither carries the components that changed."""
+        batch = _resolve_batch(self._CROSS_CLASS_SAMPLE)
+        self.assertEqual(sorted(batch), sorted(self._CROSS_CLASS_SAMPLE),
+                         "every sampled path must be ANSWERED by the one invocation; an unanswered "
+                         "path means the mode is inert for that class and this pin is vacuous")
+        for path in self._CROSS_CLASS_SAMPLE:
+            self.assertEqual(_raw_dry_run_union(path), batch[path],
+                             f"the batch record for {path} must be what the union dry run selects for "
+                             "it alone - retention add-on and self-run included")
+        self.assertIn("tests/test_retention.py", batch["tools/red-first.sh"],
+                      "the retention add-on must ride in a tools/ record, else this sample is lib-class "
+                      "and the pin above already covered it")
+        self.assertIn("tests/test_red_first.py", batch["tests/test_red_first.py"],
+                      "the self-run must ride in a changed test file's own record (':always' is tiers "
+                      "only since agents-kw7wl), else this sample is lib-class too")
 
     def test_a_batch_that_did_not_answer_is_not_trusted(self):
         """The pairing that makes the test above a measurement: a refused run and a run that printed
