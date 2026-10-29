@@ -2150,6 +2150,17 @@ def repair_missing_candidate_ids_by_location(rows: Any,
     ORDER OF TRIAL, NOT OF AUTHORITY (reviewer finding on 3e1851d0): a row whose rule_id names one candidate
     and whose title names the other is refused, because whichever one it was given to, the row's own other
     field says otherwise.
+
+    THE SAME LINE ACROSS A BATCH SPLIT IS THE SAME QUESTION (agents-3f22c). Batching splits the candidate
+    list by count, not by location, so the k4pf1 pair can land in DIFFERENT batches: the row's batch then
+    presents only one member, the tie above never forms, and the sibling guard below sees an unshown
+    candidate at the same location with NO narrowing to separate them - vacuous True - and blocks a row
+    whose own rule_id names exactly one candidate (paul-kinlan-me audit: modern-web incomplete 32/33). So
+    for a single-candidate best rank, the row's identity narrows the COMBINED presented+unshown population
+    with the same machinery: the presented candidate singled out binds (recorded as path+line+<field>), an
+    unshown candidate singled out refuses (the row describes a candidate this batch never carried), a
+    shared identity refuses as ambiguous, and a contradicting identity refuses as k4pf1 does. A row with
+    no rule or title keeps the guard exactly as conservative as before.
     """
     presented_ids: List[str] = []
     for value in presented or ():
@@ -2207,6 +2218,54 @@ def repair_missing_candidate_ids_by_location(rows: Any,
         narrowed_on: List[str] = []
         if len(at_best) > 1:
             at_best, narrowed_on = _narrow_shared_location(at_best, own, identity)
+        elif identity and any(identity.values()):
+            # THE SAME LINE ACROSS A BATCH SPLIT (agents-3f22c). Batching splits the candidate list by
+            # count, not by location, so the k4pf1 pair can present ONE of its members to this batch and
+            # hide the other in a sibling. Then the tie above never forms, `narrowed_on` stays empty and
+            # the sibling guard's `_shares_narrowing_identity(..., [])` vacuously blocks the row even
+            # though its own rule_id/title names exactly one candidate - the paul-kinlan-me audit's
+            # 32/33. So the row's identity narrows the COMBINED population with the same machinery as a
+            # presented tie: singling the presented candidate out dissolves the sibling objection (and
+            # the record names the field that crossed the split); singling an UNSHOWN candidate out is a
+            # refusal (the row describes a candidate this batch was never given); leaving both standing
+            # keeps the k4pf1 refusal. A row with no identity keeps the guard exactly as it was.
+            unshown_at_best = sorted(cid for cid, location in elsewhere.items()
+                                     if (rank(location, path, line) or 99) <= best_rank)
+            if unshown_at_best:
+                combined = {**own, **elsewhere}
+                full_tie = at_best + unshown_at_best
+                survived, narrowed_cross = _narrow_shared_location(full_tie, combined, identity)
+                if len(survived) > 1:
+                    named = ", ".join(sorted(survived)[:MISSING_ROW_NAMED_CANDIDATES])
+                    tried = [field for field in _LOCATION_IDENTITY_FIELDS if identity.get(field)]
+                    detail = (f"its {' or '.join(tried)} does not single one out" if tried
+                              else "the row names no line, rule_id or title that singles one out")
+                    if refusals is not None:
+                        refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                         "reason": (f"row carries no candidate_id and {len(survived)} "
+                                                    f"presented or unshown candidate(s) share its location "
+                                                    f"({named}); {detail}")})
+                    continue
+                if survived[0] != at_best[0]:
+                    if refusals is not None:
+                        refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                         "reason": (f"row carries no candidate_id and its "
+                                                    f"{' and '.join(narrowed_cross)} name(s) a candidate it "
+                                                    f"was NOT shown ({survived[0]}); the row describes a "
+                                                    f"candidate outside this batch's presented population")})
+                    continue
+                narrowed_on = narrowed_cross
+                conflicting = _contradicting_identity(full_tie, combined, identity, at_best[0])
+                if conflicting:
+                    named = ", ".join(sorted(full_tie)[:MISSING_ROW_NAMED_CANDIDATES])
+                    if refusals is not None:
+                        refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                         "reason": (f"row carries no candidate_id and its "
+                                                    f"{' and '.join(narrowed_on)} and "
+                                                    f"{', '.join(conflicting)} do not name the same candidate "
+                                                    f"among those sharing its location ({named}); "
+                                                    f"a self-contradicting row is not evidence for either")})
+                    continue
         if len(at_best) > 1:
             named = ", ".join(sorted(at_best)[:MISSING_ROW_NAMED_CANDIDATES])
             tried = [field for field in _LOCATION_IDENTITY_FIELDS if identity.get(field)]
