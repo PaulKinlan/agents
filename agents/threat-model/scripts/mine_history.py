@@ -68,11 +68,11 @@ ENTRY_POINT_PATTERNS = [
     )),
     ("extension-messaging", re.compile(r"""chrome\.runtime\.(?:onMessage|onConnect(?:External)?)\.addListener""")),
     # JS/TS execution sinks plus Python spawns: subprocess.*, os.system/popen/exec*/spawn*/
-    # posix_spawn, and asyncio.create_subprocess_shell/exec. Bare `spawn(`/`exec(`/`eval(` were
-    # already language-agnostic; `os.execv(` was NOT (bare `exec` requires the paren immediately).
+    # posix_spawn/posix_spawnp, and asyncio.create_subprocess_shell/exec. Bare `spawn(`/`exec(`/`eval(`
+    # were already language-agnostic; `os.execv(` was NOT (bare `exec` requires the paren immediately).
     # agents-a2pke: from-import ALIAS forms (`from subprocess import Popen` + a bare `Popen(...)`
     # call) are covered by the distinctive bare names below - Popen, check_output, check_call,
-    # getstatusoutput, posix_spawn and the os exec[vl]*/spawn[vl]* families - names with no JS/TS
+    # getstatusoutput, posix_spawn/posix_spawnp and the os exec[vl]*/spawn[vl]* families - names with no JS/TS
     # collision, the same bar create_subprocess_shell/exec already met. Bare `system(`/`popen(`
     # stay deliberately UNcovered (ordinary method-name collision risk: self.system(...)); their
     # dotted os.* forms above are the coverage for those sinks. Per-line search makes the dotted
@@ -80,9 +80,9 @@ ENTRY_POINT_PATTERNS = [
     ("code-execution", re.compile(
         r"""\b(?:child_process|spawn|exec|execSync|execFile|eval|new Function"""
         r"""|subprocess\.(?:run|call|check_call|check_output|Popen|getstatusoutput)"""
-        r"""|os\.(?:system|popen|exec\w+|spawn\w+|posix_spawn)"""
+        r"""|os\.(?:system|popen|exec\w+|spawn\w+|posix_spawnp?)"""
         r"""|create_subprocess_(?:shell|exec)"""
-        r"""|Popen|check_output|check_call|getstatusoutput|posix_spawn"""
+        r"""|Popen|check_output|check_call|getstatusoutput|posix_spawnp?"""
         r"""|exec[vl]\w*|spawn[vl]\w*)\s*\("""
     )),
     ("dom-injection", re.compile(r"""\b(?:innerHTML|outerHTML|document\.write|insertAdjacentHTML)\s*=""")),
