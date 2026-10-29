@@ -31,6 +31,7 @@ from tests.test_factory_truth import Sandbox, factory_cli, report  # noqa: E402
 
 from lib.findings import FindingsStore  # noqa: E402
 from lib.report_schema import (  # noqa: E402
+    contains_concurrency_advice,
     guard_concurrency_finding,
     has_reentrancy_precondition,
     is_concurrency_recommendation,
@@ -1021,15 +1022,15 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         violations = unpreconditioned_concurrency_findings(report)
         self.assertEqual(violations, [])
 
-    def test_descriptive_classification_survives_the_guards_own_rewrite(self):
-        """agents-f4wa5: the pipeline must not reject its OWN normalized output.
+    def test_descriptive_dns_hazard_is_not_a_concurrency_recommendation(self):
+        """agents-f4wa5 + agents-q98n8: the production shape, now fixed at the root.
 
-        The vuln-triage station failed on rule tm-dns-partial-answer-failopen (full-rss run) with
-        a concurrency validation error: "concurrent queries" in a hazard DESCRIPTION classified
-        the finding (no exclusion keyword like "risk" present), the guard wrapped its purely
-        local fail-closed remediation, and the wrapped text carried no execution-concurrency
-        phrase for Case 1's IF-branch check to find - so the validator flagged the rewrite the
-        factory itself had just produced and the station was rejected on its own output."""
+        The vuln-triage station failed on rule tm-dns-partial-answer-failopen (full-rss run):
+        "concurrent queries" in a hazard DESCRIPTION used to classify the finding, the guard
+        wrapped its purely local fail-closed remediation, and the validator rejected the
+        factory's own normalized output. Under the clause-role classifier the description is a
+        DESCRIPTION (no advice role governs the mention), so the guard never fires and the
+        remediation ships untouched."""
         finding = {
             "rule_id": "tm-dns-partial-answer-failopen",
             "path": "src/dns/resolver.ts",
@@ -1043,9 +1044,35 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                 "Fail closed on partial answers: check the TC bit and the expected record "
                 "count before accepting a response, and re-query over TCP when truncated."),
         }
+        original = finding["remediation"]
+        self.assertFalse(is_concurrency_recommendation(finding),
+                         "a hazard description that merely MENTIONS concurrent behaviour is not "
+                         "a recommendation - no advice role governs the mention")
+        report = {"findings": [finding]}
+        self.assertEqual(normalize_report(report), [])
+        self.assertEqual(finding["remediation"], original, "the local advice must ship untouched")
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+    def test_advice_borne_description_with_primitive_free_remediation_survives_the_guard(self):
+        """agents-f4wa5's wrapper-consistency guarantee stays load-bearing under agents-q98n8.
+
+        A finding classified by ADVICE in its description ("You should run these calls
+        concurrently" - directive-modal frame) whose remediation names no concurrency primitive
+        still gets wrapped, and the wrapped text still carries no phrase for Case 1's IF-branch
+        check - Case 0 (the canonical wrapper is compliant by construction) is what keeps the
+        pipeline from rejecting its own normalized output here."""
+        finding = {
+            "rule_id": "custom-unbounded-fetch",
+            "path": "src/api.ts",
+            "line_number": 12,
+            "title": "Sequential fetch loop",
+            "description": (
+                "The loop awaits each fetch in turn. You should run these calls concurrently "
+                "to hide the per-request latency."),
+            "remediation": "Batch the work.",
+        }
         self.assertTrue(is_concurrency_recommendation(finding),
-                        "the descriptive title/description fallback classifies this finding - "
-                        "that classification is the precondition of the bug, not the bug")
+                        "directive-modal advice in the description IS a recommendation")
         report = {"findings": [finding]}
         notes = normalize_report(report)
         self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
@@ -1054,8 +1081,106 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                         "the guard's own canonical wrapper must satisfy the validator")
         self.assertEqual(unpreconditioned_concurrency_findings(report), [],
                          "a station must not fail validation on the factory's own normalized output")
-        self.assertIn("Fail closed on partial answers", guarded["remediation"],
+        self.assertIn("Batch the work", guarded["remediation"],
                       "the local advice itself stays intact inside the wrapper")
+
+    ADVICE_CORPUS = (
+        # agents-ad7ov: post-nominal advisory, non-adjacent and preposed-adverbial imperatives
+        "Promise.all is recommended for these independent fetches",
+        "asyncio.gather would speed this up",
+        "Switch this loop to asyncio.gather",
+        "Wrap the calls in Promise.all to overlap them",
+        "Fan the requests out via Promise.all",
+        "For the independent fetches, use Promise.all",
+        # agents-ttcyx: infinitival and polite advice (the round-3 regression corpus)
+        "It is better to use Promise.all for the independent fetches",
+        "Better to run these with Promise.all",
+        "Please use Promise.all for these calls",
+        "You'll want to await Promise.all here",
+        # plain imperatives and description-borne directive advice
+        "Use Promise.all to run all exercises concurrently",
+        "Run the fetches concurrently",
+        "You should run these calls concurrently",
+        # agents-3t9oz: a causal otherwise does not hide the later imperative
+        "Make the parse cancellable; otherwise queue starvation blocks the pipeline; "
+        "prefer a worker pool with per-parse abort.",
+        # negated serial with an affirmative parallel clause (the contrastive split)
+        "Do not run model inference serially but run it in parallel.",
+    )
+    DESCRIPTION_CORPUS = (
+        # agents-ttcyx: subject + modal descriptions
+        "An attacker can use Promise.all to amplify requests and exhaust the connection pool.",
+        "The SDK will use Promise.all internally for every request.",
+        "The code can call Promise.all with an unbounded array.",
+        # agents-wjqez: nominalisations and first-person statements
+        "Use of Promise.all on unbounded input exhausts the socket pool.",
+        "The use of asyncio.gather here creates an unbounded task set from untrusted input.",
+        "A call to Promise.all with attacker-controlled length causes memory exhaustion.",
+        "We use Promise.all to fetch user-supplied URLs, allowing SSRF fan-out.",
+        "The use of Promise.allSettled without inspecting results silently drops rejections.",
+        "The dispatch of requests via Promise.all has no concurrency cap.",
+        # third-person indicative, gerund subject, negated advisory, mention in another clause
+        "The handler uses Promise.allSettled for every request",
+        "this function calls asyncio.gather on untrusted input",
+        "Using Promise.all on unbounded input exhausts memory.",
+        "Promise.all is not recommended here.",
+        "Consider the following: Promise.all exhausts sockets.",
+        # agents-f4wa5: a hazard description that merely mentions concurrent behaviour
+        "When concurrent queries hit the caching resolver, a partial answer for one lookup "
+        "can be served as authoritative for the next, so name resolution fails open.",
+    )
+
+    def test_advice_corpus_is_guarded_and_description_corpus_is_not(self):
+        """agents-q98n8: the consolidated corpus from every round's findings, pinned in BOTH
+        directions at BOTH levels - the mechanism (contains_concurrency_advice) and the
+        classifier the stations call (is_concurrency_recommendation: advice phrases as the
+        remediation, description phrases in the agents-wjqez repro shape - description text
+        with a local, primitive-free remediation)."""
+        for text in self.ADVICE_CORPUS:
+            with self.subTest(advice=text):
+                self.assertTrue(contains_concurrency_advice(text),
+                                "an advice clause role governs the mention - must classify")
+                self.assertTrue(is_concurrency_recommendation(
+                    {"rule_id": "custom-rule", "remediation": text}))
+        for text in self.DESCRIPTION_CORPUS:
+            with self.subTest(description=text):
+                self.assertFalse(contains_concurrency_advice(text),
+                                 "a bare mention or a predicated/nominalised one - never advice")
+                finding = {"rule_id": "unsafe-concurrency", "description": text,
+                           "remediation": "Bound the concurrency with a semaphore."}
+                self.assertFalse(is_concurrency_recommendation(finding))
+                self.assertEqual(unpreconditioned_concurrency_findings({"findings": [finding]}), [],
+                                 "a descriptive finding must not reject its report")
+
+    def test_paraphrase_is_prose_only_and_dangling_connectors_are_stripped(self):
+        """agents-obqph: `else` inside a code span is the language's own keyword - the
+        text-level paraphrase corrupted a valid snippet into invalid JavaScript ("if (a)
+        run(); if not, await run();"), and a dangling clause-final connector became an "if
+        not," that the wrapper's own fallback doubled up on ("... if not; otherwise preserve
+        serial execution.")."""
+        finding = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 42,
+            "remediation": ("Make the parse cancellable. In the async loop "
+                            "`if (a) run(); else await run();` prefer a worker pool with "
+                            "per-parse abort."),
+        }
+        report = {"findings": [finding]}
+        normalize_report(report)
+        rem = report["findings"][0]["remediation"]
+        self.assertIn("`if (a) run(); else await run();`", rem,
+                      "code spans must survive the paraphrase verbatim")
+        self.assertNotIn("if not,", rem)
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+        dangling = {"rule_id": "custom-rule", "remediation": "Use Promise.all; else"}
+        normalize_report({"findings": [dangling]})
+        rem = dangling["remediation"]
+        self.assertIn("Use Promise.all", rem)
+        self.assertNotIn("if not", rem)
+        self.assertEqual(rem.count("otherwise preserve serial execution"), 1,
+                         "a dangling connector must not double up with the wrapper's fallback")
 
     def test_guard_prefix_without_the_serial_fallback_is_not_preconditioned(self):
         """agents-f4wa5 negative pin: Case 0 accepts the canonical wrapper, not the prefix alone.

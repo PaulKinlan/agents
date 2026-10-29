@@ -274,6 +274,9 @@ def _clause_start_connector(text: str, start: int = 0):
     return _CLAUSE_START_CONNECTOR_PATTERN.search(text, start)
 
 
+_CODE_SPAN_PATTERN = re.compile(r"(```[\s\S]*?```|`[^`]*`)")
+
+
 def _paraphrase_clause_start_connectors(text: str) -> str:
     """Restate clause-start otherwise/else as "if not,", preserving every clause's own words.
 
@@ -281,16 +284,32 @@ def _paraphrase_clause_start_connectors(text: str) -> str:
     a local "otherwise" could be misread (by a reader, and by the validator) as that added IF's
     fallback. "if not" keeps the clause's antecedent - the local instruction it already followed -
     and the paraphrase decides nothing from the words that follow the connector.
+
+    agents-obqph: two boundaries the text-level regex could not see.
+    1. CODE - inside backtick spans and ```fences``` the connector words are usually the
+       language's own `else` keyword; rewriting them corrupts the snippet ("if (a) run(); else
+       await run();" became invalid JavaScript). Code fragments are passed through verbatim.
+    2. A DANGLING connector at the very end of the text has no clause to paraphrase; turning it
+       into "if not," produced "... Use Promise.all; if not; otherwise preserve serial
+       execution." once the wrapper appended its own fallback. It is removed instead (the
+       caller's rstrip cleans the leftover separator).
     """
     text = re.sub(r"\botherwise known as\b", "also known as", text, flags=re.IGNORECASE)
+    text = re.sub(r"(^|[;.,]\s*)(?:otherwise|else)\b\s*$", r"\1", text,
+                  flags=re.IGNORECASE | re.MULTILINE)
 
     def _repl(m):
         sep = m.group(1)
         connector = "If not, " if not sep.rstrip() or sep.rstrip().endswith(".") else "if not, "
         return sep + connector
 
-    return re.sub(r"(^|[;.,]\s*)(?:otherwise|else)\b[ \t]*", _repl, text,
-                  flags=re.IGNORECASE | re.MULTILINE)
+    parts = _CODE_SPAN_PATTERN.split(text)
+    for i, part in enumerate(parts):
+        if i % 2:  # a code span/fence: verbatim
+            continue
+        parts[i] = re.sub(r"(^|[;.,]\s*)(?:otherwise|else)\b[ \t]*", _repl, part,
+                          flags=re.IGNORECASE | re.MULTILINE)
+    return "".join(parts)
 
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
@@ -326,6 +345,183 @@ _WATERFALL_DISMISSAL_PATTERN = re.compile(
 )
 
 _WATERFALL_BATCH_ADVICE_PATTERN = re.compile(r"\bbatch(?:es|ing|ed)?\b", re.IGNORECASE)
+
+# -------------------------------------------------------------------------------------------------
+# Recommendation-vs-description clause roles (agents-q98n8 - the consolidated rework folding in
+# agents-wjqez / agents-ad7ov / agents-ttcyx / agents-obqph / agents-3t9oz / agents-f4wa5).
+#
+# A concurrency PRIMITIVE MENTION (_EXECUTION_CONCURRENCY_PATTERN) makes a finding a
+# recommendation only when an ADVICE clause role governs the mention - a mention is never
+# enough. Three rounds of word-adjacency patching (fleet/impl-m6hwd 2260e9ad/fbd95ed7/0841b1e8)
+# each fixed the reported phrasing and re-broke another, because one word looked at backward
+# cannot tell an imperative from a subject+modal indicative, nor an infinitival recommendation
+# from a nominalisation. So roles are decided per SEGMENT (clause split on . ; : ! ? and newline,
+# then on commas), veto-first:
+#
+#   DESCRIPTION roles (any one vetoes the segment's mention):
+#     d1 nominalisation    "use of X", "the use of X", "a call to X", "the dispatch of ..."
+#                          (agents-wjqez)
+#     d2 gerund subject    "Using X ... exhausts ..."
+#     d3 inflected cue     "the handler uses X", "this function calls X" (3rd-person -s)
+#     d4 subject + modal / subject + present cue: "An attacker can use X", "The SDK will use
+#        X", "We use X" (agents-ttcyx, agents-wjqez). Directive modals (should/must/ought)
+#        are ADVICE (a2), not vetoes.
+#     d5 negation          "X is not recommended", "do not use X", "should not run X"
+#
+#   ADVICE roles:
+#     a1 imperative        the segment starts (after optional please/kindly/always/just/
+#        instead/then/also/...) with a base-form cue governing the mention ANYWHERE in the
+#        segment: "Switch this loop to asyncio.gather", "Wrap the calls in Promise.all",
+#        "Fan the requests out via Promise.all", "For the independent fetches, use
+#        Promise.all" (agents-ad7ov: non-adjacent and preposed-adverbial imperatives)
+#     a2 advice frame      "(it is) better/preferable/safer/recommended/wise/important to
+#        <cue>", "you('ll) want to <cue>", "consider <cue/...ing>", "should/must/ought to/
+#        need to/have to <cue>", "please <cue>" (agents-ttcyx: infinitival and polite advice)
+#     a3 post-nominal      the mention itself is the subject of an advisory predication:
+#        "Promise.all is recommended for ...", "asyncio.gather would speed this up" -
+#        benefit verbs only; a harm predication ("would exhaust the pool") stays a
+#        description (agents-ad7ov)
+#
+# The old step-4 hazard-keyword shortcut (unsafe|risk|race condition|...) is GONE: it never
+# blocked the agents-wjqez false positives (none contain those keywords) and it suppressed
+# genuine advice embedded in hazard prose. Residual, deliberate: second-person modal
+# suggestions ("you can use X") read as descriptions, a cue separated from its mention by a
+# comma ("Use, for these fetches, Promise.all") is not seen, and benefit/harm verb lists are
+# open classes.
+# -------------------------------------------------------------------------------------------------
+_ADVICE_CUE_BASE = (
+    r"(?:use|run|await|call|dispatch|execute|start|issue|send|prefer|consider|switch|wrap"
+    r"|fan|batch|replace|move|migrate|adopt|parallelize|keep|leave|add|introduce|try)")
+# An -s inflected cue ("the handler uses X") is 3rd-person indicative - but the SAME token is also
+# a plural noun ("wrap the calls in X", "these calls overlap"). The forms collide (calls, runs,
+# batches, moves, starts, issues, switches, leaves, ...), so the d3 veto fires only when the token
+# before the inflected cue is NOT a determiner/quantifier/preposition/adjective - i.e. when it
+# looks like the verb's subject (agents-q98n8, measured: a bare inflection veto alone killed
+# "Wrap the calls in Promise.all", "Please use Promise.all for these calls" and "You should run
+# these calls concurrently").
+_INFLECTED_CUE_IN_CONTEXT = re.compile(
+    r"\b([\w'\u2019.-]+)\s+(?:uses|runs|awaits|calls|dispatches|executes|starts|issues|sends"
+    r"|prefers|considers|switches|wraps|fans|batches|replaces|moves|migrates|adopts"
+    r"|parallelizes|keeps|leaves|adds|introduces|tries)\b", re.IGNORECASE)
+_INFLECTION_SUBJECT_STOPWORDS = frozenset({
+    "the", "these", "those", "a", "an", "all", "some", "many", "few", "several", "both",
+    "each", "every", "my", "your", "our", "its", "their", "in", "into", "on", "for", "of",
+    "with", "without", "via", "from", "per", "and", "or", "to", "any", "no", "further",
+    "additional", "concurrent", "concurrently", "parallel", "overlapping", "multiple",
+    "various", "network", "batch", "separate", "individual", "simultaneous", "new",
+    "existing", "async", "http", "https", "api", "dns", "two", "three", "four", "more",
+    "other", "same", "single", "unbounded", "bounded", "when", "while", "if", "because",
+    "since", "after", "before", "unless", "where", "whether", "please", "always", "never",
+})
+
+# A period is a clause boundary only when NOT followed by a word character - the dots inside
+# "Promise.all" / "asyncio.gather" / "pool.map" are identifier parts, and splitting on them cut
+# every dotted mention away from its cue verb (measured: 12 of 14 advice phrases misclassified).
+_CLAUSE_BOUNDARIES = re.compile(r"(?:[;:!?\n]|\.(?!\w))+")
+# Comma AND contrastive conjunctions are sub-segment boundaries: the affirmative advice in "Do not
+# run model inference serially but run it in parallel" lives in the clause AFTER "but" (and the
+# serial-clause stripping in step 2 can leave the negation scaffolding straddling the gap, which
+# would otherwise veto the surviving imperative - measured, agents-q98n8).
+_SUBSEGMENT_BOUNDARIES = re.compile(r",|\bbut\b|\byet\b|\bhowever\b", re.IGNORECASE)
+
+_LEADING_ADVERBIALS = (
+    r"(?:please\s+|kindly\s+|always\s+|just\s+|instead\s*,?\s+|also\s+|then\s+|ideally\s+"
+    r"|simply\s+|additionally\s*,?\s+|alternatively\s*,?\s+|finally\s*,?\s+|now\s+)*")
+
+_NOMINALISED_CUE_PATTERN = re.compile(
+    r"\b(?:use|call|dispatch|execution|run|invocation|usage)\s+(?:of|to)\b"
+    r"|\b(?:the|a|an|this|that|any|each|its|our|their|your|my|such|further|additional)\s+"
+    r"(?:use|usage|dispatch|invocation|execution)s?\b",
+    re.IGNORECASE)
+_GERUND_SUBJECT_PATTERN = re.compile(
+    r"^\s*(?:using|calling|running|dispatching|executing|awaiting|sending|issuing|starting"
+    r"|wrapping|batching|parallelizing|adding|introducing|trying)\b", re.IGNORECASE)
+_SUBJECT_VERB_PATTERN = re.compile(
+    # subject NP + factual modal + cue  /  subject NP + bare present cue
+    r"\b[\w'\u2019.-]+\s+(?:can|could|will|would|may|might|shall|does|do|did)\s+"
+    r"(?:\w+\s+){0,2}?" + _ADVICE_CUE_BASE + r"\b"
+    r"|\b(?:we|i|you|they|he|she|it|the\s+[\w'\u2019.-]+|this\s+[\w'\u2019.-]+"
+    r"|that\s+[\w'\u2019.-]+|an?\s+[\w'\u2019.-]+|these\s+[\w'\u2019.-]+"
+    r"|those\s+[\w'\u2019.-]+)\s+" + _ADVICE_CUE_BASE + r"\b"
+    r"|\b(?!(?:always|never|please|just|instead|also|then|now|here|there|only|simply|ideally"
+    r"|finally|additionally|alternatively|typically|usually|often|sometimes|already|still|even"
+    r"|thus|hence|when|while|if|because|since|after|before|unless|where|whether)\b)"
+    r"[\w'\u2019.-]+s\s+" + _ADVICE_CUE_BASE + r"\b",
+    re.IGNORECASE)
+_NEGATED_ADVICE_PATTERN = re.compile(
+    r"\b(?:is|are|was|were|be|being|been)\s+(?:\w+\s+)?not\b"
+    r"|\bnot\s+(?:recommended|suggested|preferred|advised|appropriate|suitable|a\s+good\s+fit)\b"
+    r"|\b(?:do|does|did|should|must|can|could|will|would|may|might)\s*(?:not|n't)\s+"
+    r"(?:\w+\s+){0,2}?" + _ADVICE_CUE_BASE + r"\b",
+    re.IGNORECASE)
+
+# a1 tolerates leading non-word characters (markdown bullets, quotes, and the closing backtick a
+# code span leaves at clause start when the span itself contains periods) and numbered steps.
+_IMPERATIVE_ADVICE_PATTERN = re.compile(
+    r"^(?:\s*\d+[.)]\s*)?[^\w]*" + _LEADING_ADVERBIALS + _ADVICE_CUE_BASE + r"\b", re.IGNORECASE)
+_ADVICE_FRAME_PATTERN = re.compile(
+    r"\b(?:it\s+is|it's|it\s+was)?\s*(?:better|best|preferable|safer|recommended|advisable"
+    r"|wise|important|worth(?:\s+it)?)\s+to\s+" + _ADVICE_CUE_BASE + r"\b"
+    r"|\byou(?:'ll|\s+will)?\s+(?:\w+\s+)?want\s+to\s+" + _ADVICE_CUE_BASE + r"\b"
+    r"|\bconsider\s+(?:" + _ADVICE_CUE_BASE + r"\b|\w+ing\b)"
+    r"|\b(?:should|must|ought\s+to|need\s+to|have\s+to)\s+(?:\w+\s+){0,2}?" + _ADVICE_CUE_BASE + r"\b",
+    re.IGNORECASE)
+_POSTNOMINAL_ADVISORY_PATTERN = re.compile(
+    r"\b(?:is|are|was|were|be|being|been|seems?|sounds?)\s+(?:\w+\s+)?(?:recommended|suggested"
+    r"|preferred|advised|appropriate|suitable|the\s+right\s+(?:primitive|tool|choice|approach|way)"
+    r"|a\s+good\s+fit)\b"
+    r"|\b(?:would|could|should)\s+(?:\w+\s+){0,2}?(?:speed|help|improve|simplify|reduce|avoid"
+    r"|prevent|enable|allow|benefit)\b",
+    re.IGNORECASE)
+
+
+def _has_inflected_cue_verb(segment: str) -> bool:
+    """d3: a 3rd-person -s cue VERB (subject-like token + inflected cue), not a plural noun."""
+    for m in _INFLECTED_CUE_IN_CONTEXT.finditer(segment):
+        if m.group(1).lower() not in _INFLECTION_SUBJECT_STOPWORDS:
+            return True
+    return False
+
+
+def _segment_is_descriptive(segment: str) -> bool:
+    """d1-d5: the segment's mention is predicated, nominalised or negated - not advised."""
+    return bool(
+        _NOMINALISED_CUE_PATTERN.search(segment)
+        or _GERUND_SUBJECT_PATTERN.search(segment)
+        or _has_inflected_cue_verb(segment)
+        or _SUBJECT_VERB_PATTERN.search(segment)
+        or _NEGATED_ADVICE_PATTERN.search(segment)
+    )
+
+
+def _segment_is_advisory(segment: str) -> bool:
+    """a1-a3: an imperative, an advice frame or a post-nominal advisory governs the segment."""
+    return bool(
+        _IMPERATIVE_ADVICE_PATTERN.search(segment)
+        or _ADVICE_FRAME_PATTERN.search(segment)
+        or _POSTNOMINAL_ADVISORY_PATTERN.search(segment)
+    )
+
+
+def contains_concurrency_advice(text: str) -> bool:
+    """True iff some concurrency-primitive mention is governed by an advice clause role.
+
+    Mention and role must live in the SAME segment (clause between . ; : ! ? newline, split
+    further on commas): "Consider the following: Promise.all exhausts sockets" keeps its
+    description verdict because the imperative and the mention are in different clauses.
+    Vetoes are checked first within a segment ("Use of Promise.all ... exhausts" starts like
+    an imperative but is a nominalisation)."""
+    if not text or not _EXECUTION_CONCURRENCY_PATTERN.search(text):
+        return False
+    for clause in _CLAUSE_BOUNDARIES.split(text):
+        for segment in _SUBSEGMENT_BOUNDARIES.split(clause):
+            if not _EXECUTION_CONCURRENCY_PATTERN.search(segment):
+                continue
+            if _segment_is_descriptive(segment):
+                continue
+            if _segment_is_advisory(segment):
+                return True
+    return False
 _NEGATED_BATCH_ADVICE_PATTERN = re.compile(
     r"\b(?:do\s+not|don't|never|avoid)\s+batch(?:es|ing|ed)?\b", re.IGNORECASE,
 )
@@ -355,12 +551,14 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return True
 
-    # 2. Check for affirmative concurrency recommendation in remediation (Reviewer P1).
+    # 2. Check for affirmative concurrency ADVICE in remediation (Reviewer P1, agents-q98n8:
+    # advice-role analysis, not bare mention - a remediation that only DESCRIBES concurrent
+    # behaviour is not a recommendation).
     # Strip negative cessation clauses (e.g. "stop using Promise.all") and serial advocacy clauses
-    # (e.g. "run tasks sequentially") to check if any remaining text advocates concurrency.
+    # (e.g. "run tasks sequentially") to check if any remaining text advises concurrency.
     stripped_remediation = _STOP_CONCURRENCY_PATTERN.sub(" ", remediation)
     stripped_remediation = _ADVOCATES_SERIAL_PATTERN.sub(" ", stripped_remediation)
-    has_remaining_concurrency = bool(_EXECUTION_CONCURRENCY_PATTERN.search(stripped_remediation))
+    has_remaining_concurrency = contains_concurrency_advice(stripped_remediation)
     if has_remaining_concurrency:
         return True
 
@@ -391,11 +589,13 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation):
         return False
 
-    # Fallback to title/description only for affirmative recommendations, not hazard/vulnerability warnings (Reviewer P2)
+    # Fallback to title/description (agents-q98n8): advice-role analysis, NOT bare mention - a
+    # hazard description that merely mentions concurrent behaviour ("When concurrent queries hit
+    # the caching resolver ...", agents-f4wa5) is not a recommendation, whatever keywords it
+    # lacks. The old hazard-keyword shortcut is gone: it never blocked the agents-wjqez false
+    # positives and it suppressed genuine advice embedded in hazard prose.
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
-    if re.search(r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw)\b", text, re.IGNORECASE):
-        return False
-    return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
+    return contains_concurrency_advice(text)
 
 
 # Domains and primitives where concurrency is often non-reentrant or stateful
