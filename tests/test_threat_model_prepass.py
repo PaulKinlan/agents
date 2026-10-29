@@ -537,7 +537,8 @@ class TestPythonEntryPointShapes(unittest.TestCase):
     ones that keep the inventory trustworthy.
 
     Deliberate residual gaps (documented at the pattern table): Django urls.py `path(...)`/
-    `re_path(...)` (names too generic to match bare) and Go listeners/spawns.
+    `re_path(...)` (names too generic to match bare). Go listeners/spawns were the other
+    documented gap and are now covered by agents-3734h - see TestGoEntryPointShapes.
     """
 
     def _scan(self, files):
@@ -708,6 +709,226 @@ class TestPythonEntryPointShapes(unittest.TestCase):
             ),
         })
         self.assertEqual(results, [], f"Python lookalikes are not sinks, got: {results}")
+
+
+class TestGoEntryPointShapes(unittest.TestCase):
+    """agents-3734h: the entry-point inventory must see Go listeners and spawns.
+
+    The scanner always WALKED .go files, but every ENTRY_POINT_PATTERNS regex was JS/TS-or-
+    Python-shaped, so a Go target's attack surface came back EMPTY - http.HandleFunc(,
+    http.ListenAndServe(, mux.HandleFunc(, gin/echo/chi route registrations, exec.Command(
+    and syscall.Exec( all went unseen. Same fix shape as agents-ombm8: the Go alternatives
+    are merged INTO the one regex per category (a second pair reusing a category double-emits
+    findings because matched_categories iterates the pair list), pinned here on both halves -
+    the Go sinks that must be found and the Go lookalikes that must stay quiet.
+
+    The precision signal for mixed-case verbs (chi/net/http) is a leading-slash string-literal
+    first argument, because bare `.Get(` is every Go getter; ALL-CAPS verb methods (gin/echo)
+    are matched bare, since exported GET/POST/... methods on a receiver are route
+    registrations. Residual gaps are documented at the pattern table.
+    """
+
+    def _scan(self, files):
+        """Same throwaway-tree helper as TestPythonEntryPointShapes: auto-detection answers
+        third-party (no git identity), so no suppression is in play and the assertions are
+        deterministic."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for rel, code in files.items():
+                fpath = tmp_path / rel
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                fpath.write_text(code, encoding="utf-8")
+            return mine_history.scan_entry_points(tmp_path)
+
+    def test_go_listeners_detected(self):
+        results = self._scan({
+            "cmd/server/main.go": (
+                "package main\n"
+                "\n"
+                'import "net/http"\n'
+                "\n"
+                "func main() {\n"
+                "\tmux := http.NewServeMux()\n"
+                '\thttp.HandleFunc("/health", healthHandler)\n'
+                '\tmux.HandleFunc("/items", itemsHandler)\n'
+                '\tmux.Handle("/legacy", legacyHandler)\n'
+                '\tgo http.ListenAndServe(":8080", mux)\n'
+                '\thttp.ListenAndServeTLS(":443", cert, key, mux)\n'
+                "\thttp.Serve(listener, mux)\n"
+                "}\n"
+            ),
+            "internal/api/routes.go": (
+                "package api\n"
+                "\n"
+                "func registerRoutes() {\n"
+                "\tr := gin.Default()\n"
+                '\tr.GET("/items", listItems)\n'
+                '\tr.POST("/items", createItem)\n'
+                "\te := echo.New()\n"
+                '\te.PUT("/items/:id", updateItem)\n'
+                "\tc := chi.NewRouter()\n"
+                '\tc.Get("/items", listItems)\n'
+                '\tc.Post("/items", createItem)\n'
+                '\tc.Route("/api", mountAPI)\n'
+                "}\n"
+            ),
+        })
+        by_file = {}
+        for r in results:
+            self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
+            by_file.setdefault(r["path"], []).append(r["line_number"])
+        self.assertEqual(by_file, {
+            "cmd/server/main.go": [7, 8, 9, 10, 11, 12],
+            "internal/api/routes.go": [5, 6, 8, 10, 11, 12],
+        }, f"every Go listener shape must be inventoried exactly once, got: {results}")
+
+    def test_go_registration_shapes_beyond_verb_routes(self):
+        """agents-8egyo + agents-rpi6i: the shapes the first Go pass still missed, from both
+        reviewers' measured repros - echo/gin's Any/Static/StaticFS/StaticFile/File, the Go 1.22
+        method-pattern mux.Handle("GET /x", h) (first argument starts with the METHOD, so the
+        leading-slash signal misses it while bare HandleFunc catches the same shape), route
+        patterns in raw-string (backtick) literals, and the METHOD-FIRST registrations whose
+        path is the SECOND argument: echo/gin Match([]string{...}, path, h), gin Handle with an
+        http.Method constant or a "GET" literal, and chi Method/MethodFunc. Line 5 (ALL-CAPS)
+        and line 11 (bare HandleFunc) are the already-covered baselines inside the same fixture:
+        the pin proves the new branches found the OTHER lines without breaking the old ones.
+
+        agents-o1j5r, correcting the 7910a4d9 claim: a per-LINE FINDING count can never show
+        two regex branches firing on one shape - scan_entry_points collects matched_categories
+        with regex.search per line, so one finding per category per line is by construction,
+        and identical duplicate branches inside the one regex are semantically inert (ordered
+        alternation matches the first at each position). The double-emit the one-regex-per-
+        category rule exists to prevent comes from TWO PAIRS sharing a category, so THAT is
+        pinned directly (uniqueness below). The finditer pin is the branch-level precision
+        guard: exactly one match span per sink line and zero on every other line - an extra
+        span means a branch firing somewhere it should not (inside the same call, or on a
+        non-sink line), which the scanner-level pin would show only as the same line set."""
+        categories = [cat for cat, _ in mine_history.ENTRY_POINT_PATTERNS]
+        self.assertEqual(len(categories), len(set(categories)),
+                         "two pairs sharing a category emit one finding per pair for the same "
+                         "line - the double-emit the one-regex-per-category rule prevents")
+        src = (
+            "package api\n"                                     # 1
+            "\n"                                                # 2
+            "func routes() {\n"                                 # 3
+            "\te := echo.New()\n"                               # 4
+            '\te.GET("/seen-baseline", h)\n'                    # 5
+            '\te.Any("/catch-all", h)\n'                        # 6
+            '\te.Static("/assets", "public")\n'                 # 7
+            '\te.Match([]string{"GET", "POST"}, "/multi", h)\n'  # 8
+            '\te.File("/health", "health.html")\n'              # 9
+            "\tmux := http.NewServeMux()\n"                     # 10
+            '\tmux.HandleFunc("POST /a", h)\n'                  # 11
+            '\tmux.Handle("GET /b", h)\n'                       # 12
+            "\tmux.Handle(`/raw`, h)\n"                         # 13
+            "\tr := gin.Default()\n"                            # 14
+            '\tr.Any("/any", h)\n'                              # 15
+            '\tr.StaticFS("/fs", fs)\n'                         # 16
+            '\tr.StaticFile("/sf", "f")\n'                      # 17
+            '\tr.Handle(http.MethodGet, "/g", h)\n'             # 18
+            '\tr.Handle("GET", "/h", h)\n'                      # 19
+            "\tc := chi.NewRouter()\n"                          # 20
+            '\tc.Method(http.MethodGet, "/chi", h)\n'           # 21
+            '\tc.MethodFunc(http.MethodPost, "/chim", h)\n'     # 22
+            "}\n"                                               # 23
+        )
+        results = self._scan({"api/routes.go": src})
+        sink_lines = {5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22}
+        for r in results:
+            self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
+        self.assertEqual(sorted({r["line_number"] for r in results}), sorted(sink_lines),
+                         f"every Go registration shape must be inventoried, got: {results}")
+        pattern = dict(mine_history.ENTRY_POINT_PATTERNS)["server-listener"]
+        for lineno, line in enumerate(src.splitlines(), start=1):
+            expected = 1 if lineno in sink_lines else 0
+            hits = len(list(pattern.finditer(line)))
+            self.assertEqual(hits, expected,
+                             f"line {lineno} ({line!r}): the compiled server-listener regex must "
+                             f"match exactly {expected} span(s) - an extra span means a branch "
+                             f"fires where it should not, a match on a non-sink line is a false "
+                             f"positive")
+
+    def test_go_spawns_detected(self):
+        results = self._scan({
+            "internal/runner/run.go": (
+                "package runner\n"
+                "\n"
+                "import (\n"
+                '\t"os"\n'
+                '\t"os/exec"\n'
+                '\t"syscall"\n'
+                ")\n"
+                "\n"
+                "func runAll(ctx context.Context, name string) {\n"
+                '\tc := exec.Command("sh", "-c", name)\n'
+                '\tc2 := exec.CommandContext(ctx, "ls")\n'
+                '\tsyscall.Exec("/bin/ls", []string{"ls"}, env)\n'
+                '\tsyscall.ForkExec("/bin/ls", argv, attr)\n'
+                '\tos.StartProcess("/bin/ls", argv, attr)\n'
+                "}\n"
+            ),
+        })
+        self.assertEqual(
+            [(r["category"], r["line_number"]) for r in results],
+            [("code-execution", n) for n in (10, 11, 12, 13, 14)],
+            f"every Go spawn shape must be inventoried exactly once, got: {results}")
+
+    def test_go_lookalikes_stay_quiet(self):
+        """Precision half: ordinary Go must not enter the attack-surface inventory.
+
+        The pinned false-positive traps: `cache.Get(key)` (no literal), `viper.GetString("k")`
+        (not the verb method), `http.Get("https://...")` (outbound client fetch - its literal
+        is not a leading-slash route pattern), `env.Get("key", "default")` (config getter with
+        a non-path literal), `&cobra.Command{...}` (struct literal, not an exec.Command call)
+        and `cmd.Start` (the sink is already inventoried at its exec.Command line).
+        agents-8egyo adds the traps for the widened branches: `re.Match("^/api", buf)` (anchor,
+        not a route), `regexp.MatchString("GET /x")` (MatchString is not the Match method),
+        `os.OpenFile("/tmp/x", ...)` (OpenFile is not the File method), `mux.Handle(pattern, h)`
+        and `e.Any(route)` (variable patterns - the documented residual gap), and
+        `cfg.File("name")` (no leading-slash literal). agents-rpi6i adds the traps for the
+        method-first branch and the path-first Match removal: `re.Match("/api/v1", buf)` (the
+        regexp package's shape - path-first .Match( is NOT a router registration) and
+        `e.Match(methods, route)` (a method-first call whose path is a variable, not a literal).
+        """
+        results = self._scan({
+            "internal/ordinary/ordinary.go": (
+                "package ordinary\n"
+                "\n"
+                "func ordinary(ctx context.Context, client *http.Client) {\n"
+                "\tv := cache.Get(key)\n"
+                '\ts := viper.GetString("key")\n'
+                '\tresp, err := http.Get("https://api.example.com/x")\n'
+                "\tif err != nil {\n"
+                "\t\treturn\n"
+                "\t}\n"
+                "\tdefer resp.Body.Close()\n"
+                '\tfallback := env.Get("key", "default")\n'
+                '\tcmd := &cobra.Command{Use: "tool"}\n'
+                "\t_ = cmd.Start\n"
+                "\tclient.Do(req)\n"
+                "}\n"
+            ),
+            "internal/widened/widened.go": (
+                "package widened\n"
+                "\n"
+                "func widened(buf []byte, pattern string, route string, methods []string) {\n"
+                '\tok, _ := re.Match("^/api", buf)\n'
+                '\tok2, _ := re.Match("/api/v1", buf)\n'
+                '\tif regexp.MatchString("GET /x", string(buf)) {\n'
+                "\t\treturn\n"
+                "\t}\n"
+                '\tf, _ := os.OpenFile("/tmp/x", os.O_RDONLY, 0)\n'
+                "\tmux.Handle(pattern, h)\n"
+                "\te.Any(route, h)\n"
+                "\te.Match(methods, route)\n"
+                '\tname := cfg.File("name")\n'
+                "\t_ = f\n"
+                "\t_ = name\n"
+                "\t_ = ok2\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(results, [], f"Go lookalikes are not sinks, got: {results}")
 
 
 class TestSelfTargetRepositoryIdentity(unittest.TestCase):
