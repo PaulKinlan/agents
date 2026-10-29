@@ -611,6 +611,27 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     return True
 
 
+# The guard's canonical wrapper, single-sourced (agents-f4wa5): guard_concurrency_finding builds
+# every rewrite from these two constants, and has_reentrancy_precondition's Case 0 accepts exactly
+# this shape - a remediation carrying this prefix with this serial fallback stated is preconditioned
+# BY CONSTRUCTION, whatever the wrapper encloses. Before this was single-sourced, the validator's
+# Case 1 required an execution-concurrency phrase inside the IF branch, so a finding classified from
+# DESCRIPTIVE title/description text (a hazard that merely mentions "concurrent queries") was
+# wrapped by the guard into a text Case 1 could never accept: the pipeline rejected its OWN
+# normalized output and the station failed (measured on the tm-dns-partial-answer-failopen shape
+# from a full-rss vuln-triage run).
+_GUARD_PRECONDITION_PREFIX = (
+    "Precondition: Verify backend reentrancy before applying. "
+    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a "
+    "non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), ")
+_GUARD_SERIAL_FALLBACK = "; otherwise preserve serial execution."
+
+
+def _wrap_in_guard_precondition(body: str) -> str:
+    """Place `body` inside the guard's canonical IF-reentrant branch with the serial fallback."""
+    return f"{_GUARD_PRECONDITION_PREFIX}{body}{_GUARD_SERIAL_FALLBACK}"
+
+
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     """Return True if the remediation is properly conditional with a serial fallback
     or names a specific backend with cited evidence that it tolerates overlap.
@@ -624,6 +645,15 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     remediation = str(finding.get("remediation", "")).strip()
     if not remediation:
         return False
+
+    # Case 0 (agents-f4wa5): the guard's own canonical wrapper is compliant by construction -
+    # everything it encloses sits inside the IF-reentrant branch with the serial fallback stated,
+    # and a descriptive-classified finding's purely local remediation leaves no concurrency advice
+    # unchecked. Case 1's IF-branch check stays for HAND/model-written preconditions; it can never
+    # match the guard's own output when the wrapped body has no concurrency phrase, which is
+    # exactly the self-rejection this case removes.
+    if remediation.startswith(_GUARD_PRECONDITION_PREFIX) and _GUARD_SERIAL_FALLBACK in remediation:
+        return True
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
     # The fallback delimiter is the first clause-start connector AFTER the IF-reentrant clause: a
@@ -691,20 +721,11 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
             ).strip()
             clean_rem = _paraphrase_clause_start_connectors(clean_rem).rstrip().rstrip(";,.")
             if clean_rem:
-                finding["remediation"] = (
-                    "Precondition: Verify backend reentrancy before applying. "
-                    f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {clean_rem}; otherwise preserve serial execution."
-                )
+                finding["remediation"] = _wrap_in_guard_precondition(clean_rem)
             else:
-                finding["remediation"] = (
-                    "Precondition: Verify backend reentrancy before applying. "
-                    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
-                )
+                finding["remediation"] = _wrap_in_guard_precondition("consider parallel execution")
         else:
-            finding["remediation"] = (
-                "Precondition: Verify backend reentrancy before applying. "
-                "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
-            )
+            finding["remediation"] = _wrap_in_guard_precondition("consider parallel execution")
 
         desc = str(finding.get("description", "")).strip()
         if desc and "[Precondition Note:" not in desc:

@@ -1021,6 +1021,62 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         violations = unpreconditioned_concurrency_findings(report)
         self.assertEqual(violations, [])
 
+    def test_descriptive_classification_survives_the_guards_own_rewrite(self):
+        """agents-f4wa5: the pipeline must not reject its OWN normalized output.
+
+        The vuln-triage station failed on rule tm-dns-partial-answer-failopen (full-rss run) with
+        a concurrency validation error: "concurrent queries" in a hazard DESCRIPTION classified
+        the finding (no exclusion keyword like "risk" present), the guard wrapped its purely
+        local fail-closed remediation, and the wrapped text carried no execution-concurrency
+        phrase for Case 1's IF-branch check to find - so the validator flagged the rewrite the
+        factory itself had just produced and the station was rejected on its own output."""
+        finding = {
+            "rule_id": "tm-dns-partial-answer-failopen",
+            "path": "src/dns/resolver.ts",
+            "line_number": 88,
+            "title": "Partial DNS answers are accepted and fail open",
+            "description": (
+                "The resolver treats a truncated response as complete. When concurrent "
+                "queries hit the caching resolver, a partial answer for one lookup can be "
+                "served as authoritative for the next, so name resolution fails open."),
+            "remediation": (
+                "Fail closed on partial answers: check the TC bit and the expected record "
+                "count before accepting a response, and re-query over TCP when truncated."),
+        }
+        self.assertTrue(is_concurrency_recommendation(finding),
+                        "the descriptive title/description fallback classifies this finding - "
+                        "that classification is the precondition of the bug, not the bug")
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        guarded = report["findings"][0]
+        self.assertTrue(has_reentrancy_precondition(guarded),
+                        "the guard's own canonical wrapper must satisfy the validator")
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [],
+                         "a station must not fail validation on the factory's own normalized output")
+        self.assertIn("Fail closed on partial answers", guarded["remediation"],
+                      "the local advice itself stays intact inside the wrapper")
+
+    def test_guard_prefix_without_the_serial_fallback_is_not_preconditioned(self):
+        """agents-f4wa5 negative pin: Case 0 accepts the canonical wrapper, not the prefix alone.
+
+        The same preamble with NO stated serial fallback is an unbacked conditional and must
+        still be rejected (and Case 1 cannot save it: with no clause-start connector after the
+        IF clause there is no fallback to check)."""
+        finding = {
+            "rule_id": "sequential-await-waterfall",
+            "path": "src/model.ts",
+            "line_number": 20,
+            "remediation": (
+                "Precondition: Verify backend reentrancy before applying. "
+                "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not "
+                "use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU "
+                "queues), run the fetches concurrently"),
+        }
+        self.assertFalse(has_reentrancy_precondition(finding))
+        self.assertTrue(unpreconditioned_concurrency_findings({"findings": [finding]}),
+                        "prefix without the serial fallback stays a violation")
+
     def test_unsafe_fallback_across_sentences_is_rejected_and_repaired(self):
         """agents-b99s8: unsafe intermediate fallback across sentence boundaries is rejected and repaired."""
         remediation = (
