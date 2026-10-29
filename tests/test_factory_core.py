@@ -472,6 +472,23 @@ class TestDispatcherBudget(unittest.TestCase):
             self.assertEqual(report["status"], "TIMEOUT")
             self.assertEqual(report["verdict"], "timeout")
 
+            # An exhausted budget before call_timeout funds the engine is NOT a
+            # silent engine kill: no engine call was made and no retry is due.
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.object(factory_cli, "budget_for", frozen_budget), \
+                 mock.patch.object(StationBudget, "call_timeout",
+                                   side_effect=factory_cli.StationTimeout("budget exhausted before engine")), \
+                 mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(factory_cli.StationTimeout) as ctx:
+                    factory_cli.run_agent("hung", str(target), engine_arg="pi")
+            self.assertNotIsInstance(ctx.exception, factory_cli.SilentStationError)
+            self.assertIn("exhausted before engine", str(ctx.exception))
+            first_runs = sorted(r for r in (sandbox / "runs").glob("hung-*")
+                                if "-attempt2" not in r.name)
+            self.assertEqual(len(first_runs), 1)
+            first_report = json.loads((first_runs[0] / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(first_report["status"], "TIMEOUT")
+
 
 class TestDispatcherChildEnvironment(unittest.TestCase):
     """The engine and pre-pass children get an explicit, credential-free environment (SF-04)."""

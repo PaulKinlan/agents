@@ -2612,7 +2612,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 # answer, reported TIMEOUT.
                 produced_output = run_dir / "model_output.txt"
                 engine_silent = (not produced_output.exists()) or produced_output.stat().st_size == 0
-                if attempt == 1 and not batched and engine_silent:
+                # A deadline can expire in call_timeout BEFORE the engine is invoked.
+                # In that case there is no timed-out engine call to retry; the call
+                # evidence is appended only by run_station_command's timeout path.
+                engine_timed_out = bool(engine_calls and engine_calls[-1].get("outcome") == "timeout")
+                if attempt == 1 and not batched and engine_silent and engine_timed_out:
                     silent_reason = (f"{agent_name}: engine '{engine}' produced no verdict and no "
                                      f"output (station budget expired: {reason}; silent station)")
                     report = {

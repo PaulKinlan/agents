@@ -23,6 +23,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from lib.budget import StationBudget
 from lib.credential_broker import PLACEHOLDER_PREFIX
 from lib.sandbox import sandbox_available
 
@@ -613,12 +614,19 @@ class TestLineAndon(unittest.TestCase):
         first attempt is killed at its (deliberately tiny) budget leaving a 0-byte
         model_output.txt, the repair-retry answers, and the line completes COMPLETE - instead
         of the whole nightly losing the station's verdict to one hung model call (qa-station,
-        2026-10-27). The first attempt keeps its explicit timeout reason in its own run dir."""
+        2026-10-27). The first attempt keeps its explicit timeout reason in its own run dir.
+        Freeze setup's clock so a loaded host cannot make the test pass without launching
+        and killing the engine (agents-rdkqf)."""
+        def frozen_budget(agent_cfg, label="station", override_minutes=None):
+            minutes = (override_minutes if override_minutes is not None
+                       else (agent_cfg.get("budget") or {}).get("max_minutes"))
+            return StationBudget(minutes, label=label, clock=lambda: 0.0)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = self._sandbox(tmpdir, halt=True, stations=["hangrecover", "okprobe"])
             sandbox._agent("hangrecover")
-            # 15 s: headroom so sandbox bind setup finishes before the engine step (the same
-            # budget test_factory_core.py's hung-engine test uses), then the engine dies.
+            # 13.5 s engine allowance leaves room for the real sandboxed retry;
+            # setup uses the frozen station clock so it cannot eat that allowance.
             (sandbox.root / "agents" / "hangrecover" / "agent.yaml").write_text(
                 "name: hangrecover\n"
                 "class: observer\n"
@@ -650,7 +658,8 @@ class TestLineAndon(unittest.TestCase):
                 encoding="utf-8",
             )
             stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-            result, output = sandbox.run()
+            with mock.patch.object(factory_cli, "budget_for", frozen_budget):
+                result, output = sandbox.run()
 
             self.assertTrue(result, "budget-killed-then-valid must recover via the silent retry")
             self.assertIn("COMPLETE", output)
