@@ -314,17 +314,21 @@ def setUpModule():
     # Filter actual bash gate invocations: tracked_paths() may also spawn git while building
     # the inventory, and that must not be mistaken for a paid gate startup.
     global _SETUP_GATE_STARTUPS
-    actual_run = subprocess.run
+    actual_popen = subprocess.Popen
     starts: list[tuple[bool, frozenset[str]]] = []
 
-    def record_gate_start(cmd, *args, **kwargs):
-        if cmd == ["bash", str(FAST_GATE)] and kwargs.get("cwd") == ROOT:
+    def record_gate_start(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        parts = cmd if isinstance(cmd, (list, tuple)) else [cmd]
+        if any("tools/fast-gate.sh" in str(part) for part in parts):
+            # Popen is shared by run, check_output and direct spawns. Do not require a
+            # particular argv/cwd: a per-path refactor using another API must be counted.
             env = kwargs.get("env") or {}
             starts.append((env.get("FAST_GATE_RESOLVE_PATHS") == "1",
                            frozenset(env.get("GIT_CHANGED", "").splitlines())))
-        return actual_run(cmd, *args, **kwargs)
+        return actual_popen(*args, **kwargs)
 
-    with mock.patch.object(subprocess, "run", side_effect=record_gate_start):
+    with mock.patch.object(subprocess, "Popen", side_effect=record_gate_start):
         inventory = set(_PROBE_INVENTORY)
         inventory.update(str(p.relative_to(ROOT)) for p in ROOT.glob("lib/*.py"))
         inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("lib/sinks") if p.suffix == ".py")
@@ -831,13 +835,6 @@ class TestFastGateMapping(unittest.TestCase):
         """
         self.assertTrue(_PROBE_INVENTORY, "an empty inventory cannot prove cache hits")
         self.assertTrue(_PATH_RECORDS, "the batched setup must populate mapping records")
-        self.assertEqual(
-            _SETUP_GATE_STARTUPS,
-            ((True, frozenset(_PATH_RECORDS)),
-             (False, frozenset(_REFUSAL_PROBES)),
-             (False, frozenset(_QUIET_PROBES))),
-            "setUpModule must pay for exactly one batched mapping, one shared refusal, "
-            "and one shared quiet fallback, not a startup per path")
         self.assertFalse(set(_PROBE_INVENTORY) - _PATH_RECORDS.keys(),
                          "literal probes must be included in the batched cache")
         real_run = subprocess.run
@@ -849,6 +846,19 @@ class TestFastGateMapping(unittest.TestCase):
                     self.assertEqual(resolve_fast_gate([path]), expected)
                     self.assertEqual(gate_run.call_count, 0,
                                      f"{path}: cached mapping paid {gate_run.call_count} gate startup(s)")
+
+    def test_setup_module_pays_for_three_shared_gate_startups(self):
+        """agents-38swf: pin startup count independently of mapping answers and test order."""
+        self.assertEqual(len(_SETUP_GATE_STARTUPS), 3,
+                         f"setUpModule paid {len(_SETUP_GATE_STARTUPS)} gate starts, expected 3: "
+                         f"{[(mode, len(paths)) for mode, paths in _SETUP_GATE_STARTUPS]}")
+        batched = [paths for mode, paths in _SETUP_GATE_STARTUPS if mode]
+        plain = [paths for mode, paths in _SETUP_GATE_STARTUPS if not mode]
+        self.assertEqual(len(batched), 1, "one batched inventory startup")
+        self.assertTrue(set(_PROBE_INVENTORY) <= batched[0],
+                        "the batched startup must include every literal mapping probe")
+        self.assertCountEqual(plain, [frozenset(_REFUSAL_PROBES), frozenset(_QUIET_PROBES)],
+                              "one shared refusal and one shared quiet startup, not per-path runs")
 
     def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
         """A change with NO patches/ involvement selects exactly what it selected before
