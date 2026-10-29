@@ -779,6 +779,46 @@ class TestGoEntryPointShapes(unittest.TestCase):
             "internal/api/routes.go": [5, 6, 8, 10, 11, 12],
         }, f"every Go listener shape must be inventoried exactly once, got: {results}")
 
+    def test_go_registration_shapes_beyond_verb_routes(self):
+        """agents-8egyo: the shapes the first Go pass still missed, from the reviewer's measured
+        repro - echo/gin's Any/Static/StaticFS/StaticFile/File/Match registrations, the Go 1.22
+        method-pattern mux.Handle("GET /x", h) (first argument starts with the METHOD, so the
+        leading-slash signal misses it while bare HandleFunc catches the same shape), and route
+        patterns in raw-string (backtick) literals. Line 5 (ALL-CAPS) and line 11 (bare
+        HandleFunc) are the already-covered baselines inside the same fixture: the pin proves the
+        new branches found the OTHER lines without breaking the old ones."""
+        results = self._scan({
+            "api/routes.go": (
+                "package api\n"                                     # 1
+                "\n"                                                # 2
+                "func routes() {\n"                                 # 3
+                "\te := echo.New()\n"                               # 4
+                '\te.GET("/seen-baseline", h)\n'                    # 5
+                '\te.Any("/catch-all", h)\n'                        # 6
+                '\te.Static("/assets", "public")\n'                 # 7
+                '\te.Match("/multi", h)\n'                          # 8
+                '\te.File("/health", "health.html")\n'              # 9
+                "\tmux := http.NewServeMux()\n"                     # 10
+                '\tmux.HandleFunc("POST /a", h)\n'                  # 11
+                '\tmux.Handle("GET /b", h)\n'                       # 12
+                "\tmux.Handle(`/raw`, h)\n"                         # 13
+                "\tr := gin.Default()\n"                            # 14
+                '\tr.Any("/any", h)\n'                              # 15
+                '\tr.StaticFS("/fs", fs)\n'                         # 16
+                '\tr.StaticFile("/sf", "f")\n'                      # 17
+                "}\n"                                               # 18
+            ),
+        })
+        per_line = {}
+        for r in results:
+            self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
+            per_line[r["line_number"]] = per_line.get(r["line_number"], 0) + 1
+        self.assertEqual(sorted(per_line), [5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17],
+                         f"every Go registration shape must be inventoried, got: {results}")
+        self.assertEqual(set(per_line.values()), {1},
+                         f"exactly once per line - a shape matched by two branches double-emits, "
+                         f"got: {results}")
+
     def test_go_spawns_detected(self):
         results = self._scan({
             "internal/runner/run.go": (
@@ -812,6 +852,11 @@ class TestGoEntryPointShapes(unittest.TestCase):
         is not a leading-slash route pattern), `env.Get("key", "default")` (config getter with
         a non-path literal), `&cobra.Command{...}` (struct literal, not an exec.Command call)
         and `cmd.Start` (the sink is already inventoried at its exec.Command line).
+        agents-8egyo adds the traps for the widened branches: `re.Match("^/api", buf)` (anchor,
+        not a route), `regexp.MatchString("GET /x")` (MatchString is not the Match method),
+        `os.OpenFile("/tmp/x", ...)` (OpenFile is not the File method), `mux.Handle(pattern, h)`
+        and `e.Any(route)` (variable patterns - the documented residual gap), and
+        `cfg.File("name")` (no leading-slash literal).
         """
         results = self._scan({
             "internal/ordinary/ordinary.go": (
@@ -829,6 +874,22 @@ class TestGoEntryPointShapes(unittest.TestCase):
                 '\tcmd := &cobra.Command{Use: "tool"}\n'
                 "\t_ = cmd.Start\n"
                 "\tclient.Do(req)\n"
+                "}\n"
+            ),
+            "internal/widened/widened.go": (
+                "package widened\n"
+                "\n"
+                "func widened(buf []byte, pattern string, route string) {\n"
+                '\tok, _ := re.Match("^/api", buf)\n'
+                '\tif regexp.MatchString("GET /x", string(buf)) {\n'
+                "\t\treturn\n"
+                "\t}\n"
+                '\tf, _ := os.OpenFile("/tmp/x", os.O_RDONLY, 0)\n'
+                "\tmux.Handle(pattern, h)\n"
+                "\te.Any(route, h)\n"
+                '\tname := cfg.File("name")\n'
+                "\t_ = f\n"
+                "\t_ = name\n"
                 "}\n"
             ),
         })

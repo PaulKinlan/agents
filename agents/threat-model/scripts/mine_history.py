@@ -51,9 +51,18 @@ SECURITY_KEYWORDS = [
 #   getters), chi/net/http mixed-case verb, Route and Handle registrations (only when the first
 #   argument is a leading-slash string literal: bare `.Get(` is every Go getter, so the literal
 #   is the precision signal), and os/exec's Command[Context] plus syscall/unix Exec/ForkExec and
-#   os.StartProcess. Residual, deliberate Go gaps: verb routes registered with a variable
-#   pattern, router libraries beyond net/http+gin+echo+chi, aliased os/exec imports, and
-#   cmd.Start()/cmd.Run() (the same sink is already inventoried at its exec.Command line).
+#   os.StartProcess. agents-8egyo widened the Go coverage to the shapes the first pass missed:
+#   echo/gin's Any/Static/StaticFS/StaticFile/File/Match registrations (same leading-slash
+#   literal signal), Go 1.22 method-pattern mux.Handle("GET /x", h) (its first argument starts
+#   with the METHOD, so the slash signal alone misses it while bare HandleFunc catches the same
+#   shape), and route patterns in raw-string (backtick) literals. Residual, deliberate Go gaps:
+#   verb routes registered with a variable pattern, Go 1.22 host-prefixed method patterns
+#   ("example.com/GET /x"), chi's r.Method(http.MethodGet, "/x", h) (first argument is a
+#   constant, not a literal), router libraries beyond net/http+gin+echo+chi, aliased os/exec
+#   imports, and cmd.Start()/cmd.Run() (the same sink is already inventoried at its exec.Command
+#   line). Accepted narrow precision costs of the literal signal: regexp.Match("/literal", ...)
+#   and a backtick config path (cfg.Get(`/etc/x`)) can enter the inventory; both are rare and
+#   cheap to triage against the recall they buy.
 # - from-import aliases of NON-distinctive names (`from uvicorn import run` + bare `run(...)`,
 #   `from os import system` + bare `system(...)`): the names are too generic to match bare
 #   (agents-a2pke). Distinctive aliases (Popen, check_output, ...) ARE covered - see the
@@ -69,7 +78,10 @@ ENTRY_POINT_PATTERNS = [
     # gin/echo register routes with ALL-CAPS verb METHODS on a receiver, and chi/net/http
     # mixed-case verbs, Route and Handle only match with a leading-slash string-literal first
     # argument - the precision signal that keeps cache.Get(key), viper.GetString("k") and
-    # http.Get("https://...") out of the inventory.
+    # http.Get("https://...") out of the inventory. agents-8egyo: the literal may be a Go
+    # raw-string (backtick) as well, echo/gin's Any/Static[FS|File]/File/Match registrations
+    # carry the same signal, and Go 1.22 method patterns (mux.Handle("GET /x", h)) start with
+    # the METHOD rather than the slash, so .Handle gets its own method-pattern branch.
     ("server-listener", re.compile(
         r"""\b(?:app\.(?:get|post|put|delete|use|run)|createServer|new WebSocketServer"""
         r"""|(?:Threading)?HTTPServer|(?:Threading|Forking)?(?:TCP|UDP|UnixStream|UnixDatagram)Server"""
@@ -79,7 +91,9 @@ ENTRY_POINT_PATTERNS = [
         r"""|head|options|websocket)\s*\("""
         r"""|\bHandleFunc\s*\(|\bListenAndServe(?:TLS)?\s*\(|\bhttp\.Serve\s*\("""
         r"""|\.(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\("""
-        r"""|\.(?:Get|Post|Put|Delete|Patch|Head|Options|Route|Handle)\s*\(\s*["']/"""
+        r"""|\.(?:Get|Post|Put|Delete|Patch|Head|Options|Route|Handle|Any"""
+        r"""|Static(?:FS|File)?|File|Match)\s*\(\s*["'`]/"""
+        r"""|\.Handle\s*\(\s*["'`](?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/"""
     )),
     ("extension-messaging", re.compile(r"""chrome\.runtime\.(?:onMessage|onConnect(?:External)?)\.addListener""")),
     # JS/TS execution sinks plus Python spawns: subprocess.*, os.system/popen/exec*/spawn*/
