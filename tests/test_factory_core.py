@@ -361,8 +361,9 @@ class TestDispatcherBudget(unittest.TestCase):
         pre-check (lib/budget.py timeout_for) instead of the engine kill: red on a healthy delta
         (measured: fast-gate job 1fbcf023 on a comments-only change) AND vacuous - the hung
         engine never launched, so that run proved nothing about killing one. With the clock
-        frozen, setup charges nothing, the engine step is always offered its full declared
-        allowance, and the real run_station_command kills the real sleep-60 stub at the real
+        frozen, setup charges nothing, and the engine step is offered 2.7 s of the declared
+        3 s after call_timeout reserves 10% (0.3 s) for findings dispatch. The real
+        run_station_command kills the real sleep-60 stub at the real
         communicate() expiry. Everything load-bearing stays real - budget arithmetic, the
         group kill, the StationTimeout text; only the clock SOURCE is fake, and budget
         construction from yaml is pinned by lib/budget's own tests.
@@ -381,10 +382,10 @@ class TestDispatcherBudget(unittest.TestCase):
                 "class: observer\n"
                 "containment: t0-readonly\n"
                 "short_circuit_empty: false\n"
-                # 3 s kill window. This no longer needs headroom for setup: the frozen clock
-                # keeps setup from charging the budget at all, so the declaration only ever
-                # funds the engine's allowance - which is what makes the 0.25 -> 0.05 drop safe
-                # (and makes this test ~5x faster than the quiet-box 15 s it replaced).
+                # 2.7 s kill window (3 s declared minus the 10% dispatch reserve). The frozen
+                # clock keeps setup from charging the budget, so no setup headroom is needed;
+                # the 0.25 -> 0.05 drop is safe and cuts the engine allowance from 13.5 s
+                # to 2.7 s (5x) without spending the dispatch reserve.
                 "budget: {max_minutes: 0.05}\n",
                 encoding="utf-8",
             )
