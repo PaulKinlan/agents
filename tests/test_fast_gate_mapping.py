@@ -296,6 +296,7 @@ _PATH_RECORDS: dict[str, tuple[str, list[str]]] = {}
 _ALWAYS_SUITES: set[str] = set()
 _SHARED_REFUSALS: dict[str, subprocess.CompletedProcess] = {}
 _SHARED_QUIETS: dict[str, subprocess.CompletedProcess] = {}
+_SETUP_GATE_STARTUPS: tuple[tuple[bool, frozenset[str]], ...] = ()
 
 
 def setUpModule():
@@ -308,20 +309,37 @@ def setUpModule():
     report. Adding a pin: add its path to _PROBE_INVENTORY (globs cover whole directories), and
     only give it its own startup when it asserts PROCESS semantics a record cannot express.
     """
-    inventory = set(_PROBE_INVENTORY)
-    inventory.update(str(p.relative_to(ROOT)) for p in ROOT.glob("lib/*.py"))
-    inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("lib/sinks") if p.suffix == ".py")
-    inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("patches") if p.suffix == ".patch")
-    records, always_suites = resolve_paths_mapping(sorted(inventory), with_always=True)
-    _PATH_RECORDS.update(records)
-    _ALWAYS_SUITES.update(always_suites)
+    # agents-38swf: measure PROCESS starts during setup, not just cache hits after setup.
+    # A refactor that starts the gate once per path can preserve every mapping answer.
+    # Filter actual bash gate invocations: tracked_paths() may also spawn git while building
+    # the inventory, and that must not be mistaken for a paid gate startup.
+    global _SETUP_GATE_STARTUPS
+    actual_run = subprocess.run
+    starts: list[tuple[bool, frozenset[str]]] = []
 
-    refusal_proc = run_fast_gate(sorted(set(_REFUSAL_PROBES)))
-    for probe in _REFUSAL_PROBES:
-        _SHARED_REFUSALS[probe] = refusal_proc
-    quiet_proc = run_fast_gate(sorted(set(_QUIET_PROBES)))
-    for probe in _QUIET_PROBES:
-        _SHARED_QUIETS[probe] = quiet_proc
+    def record_gate_start(cmd, *args, **kwargs):
+        if cmd == ["bash", str(FAST_GATE)] and kwargs.get("cwd") == ROOT:
+            env = kwargs.get("env") or {}
+            starts.append((env.get("FAST_GATE_RESOLVE_PATHS") == "1",
+                           frozenset(env.get("GIT_CHANGED", "").splitlines())))
+        return actual_run(cmd, *args, **kwargs)
+
+    with mock.patch.object(subprocess, "run", side_effect=record_gate_start):
+        inventory = set(_PROBE_INVENTORY)
+        inventory.update(str(p.relative_to(ROOT)) for p in ROOT.glob("lib/*.py"))
+        inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("lib/sinks") if p.suffix == ".py")
+        inventory.update(str(p.relative_to(ROOT)) for p in tracked_paths("patches") if p.suffix == ".patch")
+        records, always_suites = resolve_paths_mapping(sorted(inventory), with_always=True)
+        _PATH_RECORDS.update(records)
+        _ALWAYS_SUITES.update(always_suites)
+
+        refusal_proc = run_fast_gate(sorted(set(_REFUSAL_PROBES)))
+        for probe in _REFUSAL_PROBES:
+            _SHARED_REFUSALS[probe] = refusal_proc
+        quiet_proc = run_fast_gate(sorted(set(_QUIET_PROBES)))
+        for probe in _QUIET_PROBES:
+            _SHARED_QUIETS[probe] = quiet_proc
+    _SETUP_GATE_STARTUPS = tuple(starts)
 
 
 def run_fast_gate(changed_files: list[str]) -> subprocess.CompletedProcess:
@@ -813,6 +831,13 @@ class TestFastGateMapping(unittest.TestCase):
         """
         self.assertTrue(_PROBE_INVENTORY, "an empty inventory cannot prove cache hits")
         self.assertTrue(_PATH_RECORDS, "the batched setup must populate mapping records")
+        self.assertEqual(
+            _SETUP_GATE_STARTUPS,
+            ((True, frozenset(_PATH_RECORDS)),
+             (False, frozenset(_REFUSAL_PROBES)),
+             (False, frozenset(_QUIET_PROBES))),
+            "setUpModule must pay for exactly one batched mapping, one shared refusal, "
+            "and one shared quiet fallback, not a startup per path")
         self.assertFalse(set(_PROBE_INVENTORY) - _PATH_RECORDS.keys(),
                          "literal probes must be included in the batched cache")
         real_run = subprocess.run
