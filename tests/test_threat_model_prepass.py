@@ -788,43 +788,62 @@ class TestGoEntryPointShapes(unittest.TestCase):
         path is the SECOND argument: echo/gin Match([]string{...}, path, h), gin Handle with an
         http.Method constant or a "GET" literal, and chi Method/MethodFunc. Line 5 (ALL-CAPS)
         and line 11 (bare HandleFunc) are the already-covered baselines inside the same fixture:
-        the pin proves the new branches found the OTHER lines without breaking the old ones."""
-        results = self._scan({
-            "api/routes.go": (
-                "package api\n"                                     # 1
-                "\n"                                                # 2
-                "func routes() {\n"                                 # 3
-                "\te := echo.New()\n"                               # 4
-                '\te.GET("/seen-baseline", h)\n'                    # 5
-                '\te.Any("/catch-all", h)\n'                        # 6
-                '\te.Static("/assets", "public")\n'                 # 7
-                '\te.Match([]string{"GET", "POST"}, "/multi", h)\n'  # 8
-                '\te.File("/health", "health.html")\n'              # 9
-                "\tmux := http.NewServeMux()\n"                     # 10
-                '\tmux.HandleFunc("POST /a", h)\n'                  # 11
-                '\tmux.Handle("GET /b", h)\n'                       # 12
-                "\tmux.Handle(`/raw`, h)\n"                         # 13
-                "\tr := gin.Default()\n"                            # 14
-                '\tr.Any("/any", h)\n'                              # 15
-                '\tr.StaticFS("/fs", fs)\n'                         # 16
-                '\tr.StaticFile("/sf", "f")\n'                      # 17
-                '\tr.Handle(http.MethodGet, "/g", h)\n'             # 18
-                '\tr.Handle("GET", "/h", h)\n'                      # 19
-                "\tc := chi.NewRouter()\n"                          # 20
-                '\tc.Method(http.MethodGet, "/chi", h)\n'           # 21
-                '\tc.MethodFunc(http.MethodPost, "/chim", h)\n'     # 22
-                "}\n"                                               # 23
-            ),
-        })
-        per_line = {}
+        the pin proves the new branches found the OTHER lines without breaking the old ones.
+
+        agents-o1j5r, correcting the 7910a4d9 claim: a per-LINE FINDING count can never show
+        two regex branches firing on one shape - scan_entry_points collects matched_categories
+        with regex.search per line, so one finding per category per line is by construction,
+        and identical duplicate branches inside the one regex are semantically inert (ordered
+        alternation matches the first at each position). The double-emit the one-regex-per-
+        category rule exists to prevent comes from TWO PAIRS sharing a category, so THAT is
+        pinned directly (uniqueness below). The finditer pin is the branch-level precision
+        guard: exactly one match span per sink line and zero on every other line - an extra
+        span means a branch firing somewhere it should not (inside the same call, or on a
+        non-sink line), which the scanner-level pin would show only as the same line set."""
+        categories = [cat for cat, _ in mine_history.ENTRY_POINT_PATTERNS]
+        self.assertEqual(len(categories), len(set(categories)),
+                         "two pairs sharing a category emit one finding per pair for the same "
+                         "line - the double-emit the one-regex-per-category rule prevents")
+        src = (
+            "package api\n"                                     # 1
+            "\n"                                                # 2
+            "func routes() {\n"                                 # 3
+            "\te := echo.New()\n"                               # 4
+            '\te.GET("/seen-baseline", h)\n'                    # 5
+            '\te.Any("/catch-all", h)\n'                        # 6
+            '\te.Static("/assets", "public")\n'                 # 7
+            '\te.Match([]string{"GET", "POST"}, "/multi", h)\n'  # 8
+            '\te.File("/health", "health.html")\n'              # 9
+            "\tmux := http.NewServeMux()\n"                     # 10
+            '\tmux.HandleFunc("POST /a", h)\n'                  # 11
+            '\tmux.Handle("GET /b", h)\n'                       # 12
+            "\tmux.Handle(`/raw`, h)\n"                         # 13
+            "\tr := gin.Default()\n"                            # 14
+            '\tr.Any("/any", h)\n'                              # 15
+            '\tr.StaticFS("/fs", fs)\n'                         # 16
+            '\tr.StaticFile("/sf", "f")\n'                      # 17
+            '\tr.Handle(http.MethodGet, "/g", h)\n'             # 18
+            '\tr.Handle("GET", "/h", h)\n'                      # 19
+            "\tc := chi.NewRouter()\n"                          # 20
+            '\tc.Method(http.MethodGet, "/chi", h)\n'           # 21
+            '\tc.MethodFunc(http.MethodPost, "/chim", h)\n'     # 22
+            "}\n"                                               # 23
+        )
+        results = self._scan({"api/routes.go": src})
+        sink_lines = {5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22}
         for r in results:
             self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
-            per_line[r["line_number"]] = per_line.get(r["line_number"], 0) + 1
-        self.assertEqual(sorted(per_line), [5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22],
+        self.assertEqual(sorted({r["line_number"] for r in results}), sorted(sink_lines),
                          f"every Go registration shape must be inventoried, got: {results}")
-        self.assertEqual(set(per_line.values()), {1},
-                         f"exactly once per line - a shape matched by two branches double-emits, "
-                         f"got: {results}")
+        pattern = dict(mine_history.ENTRY_POINT_PATTERNS)["server-listener"]
+        for lineno, line in enumerate(src.splitlines(), start=1):
+            expected = 1 if lineno in sink_lines else 0
+            hits = len(list(pattern.finditer(line)))
+            self.assertEqual(hits, expected,
+                             f"line {lineno} ({line!r}): the compiled server-listener regex must "
+                             f"match exactly {expected} span(s) - an extra span means a branch "
+                             f"fires where it should not, a match on a non-sink line is a false "
+                             f"positive")
 
     def test_go_spawns_detected(self):
         results = self._scan({
