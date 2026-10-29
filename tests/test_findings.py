@@ -2541,6 +2541,89 @@ class TestASharedLocationIsNarrowedByTheRowsOwnRuleOrTitle(unittest.TestCase):
         self.assertEqual(coverage["rows_without_candidate_id"], 0)
 
 
+class TestACrossBatchSharedLocationIsStillSeparatedByTheRowsRule(unittest.TestCase):
+    """agents-3f22c: batching splits candidates by COUNT, not by location, so the two same-line
+    candidates of the k4pf1 shape can land in DIFFERENT batches. Then the row's batch presents only
+    ONE of the pair, the presented tie never forms, `_narrow_shared_location` never runs and
+    `narrowed_on` stays empty - and the sibling guard's `_shares_narrowing_identity(..., [])`
+    vacuously blocks the row even though its own `rule_id` names exactly one candidate. That is the
+    paul-kinlan-me audit's 32/33. The row's identity must join the two populations: a rule that
+    singles the PRESENTED candidate out dissolves the sibling objection (and is recorded), a rule
+    that singles the UNSHOWN candidate out is a refusal (the row describes a candidate this batch
+    was never given), and a rule the unshown candidate SHARES leaves the ambiguity standing.
+    """
+
+    LOCATIONS = {
+        "aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
+                             "rule_id": "legacy-reset", "title": "Vendor reset contradicts native"},
+        "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
+                             "rule_id": "unused-vendor-prefix", "title": "Prefixed property, no modern form"},
+    }
+    # The batch split: the row's batch was shown ONLY cccc; aaaa went to a sibling batch.
+    PRESENTED = ["cccc3333dddd4444"]
+
+    def repair(self, rows, locations=None, presented=None):
+        refusals = []
+        repairs = repair_cited_candidate_ids(
+            rows, self.PRESENTED if presented is None else presented, refusals=refusals,
+            candidate_locations=self.LOCATIONS if locations is None else locations)
+        return repairs, refusals
+
+    def cited(self, rows):
+        return [row.get("candidate_id") for row in rows]
+
+    def test_a_rule_naming_the_presented_candidate_binds_across_the_batch_split(self):
+        """The 32/33 itself: the row's rule_id names the one candidate this batch was shown, and an
+        unshown sibling on the same line must not read as 'what the row meant' over it."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((self.cited(rows), refusals), (["cccc3333dddd4444"], []))
+        self.assertEqual(repairs[0]["rule"], "path+line+rule_id",
+                         "the record must say the row's own rule crossed the batch split")
+
+    def test_a_rule_naming_the_candidate_it_was_not_shown_is_refused(self):
+        """The inverse split: the row's rule names the candidate the SIBLING batch got. Binding it to
+        the presented one would answer one candidate's id with another's verdict; the honest answer is
+        the refusal, naming the candidate the row described and this batch never carried."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "legacy-reset"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("NOT shown", refusals[0]["reason"])
+        self.assertIn("aaaa1111bbbb2222", refusals[0]["reason"],
+                      "the refusal names the candidate the row described but the batch never showed")
+
+    def test_an_identityless_row_is_still_blocked_by_an_unshown_sibling(self):
+        """No rule, no title: the guard is exactly as conservative as before the fix, because nothing
+        the row says can separate two candidates on one line."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("NOT shown", refusals[0]["reason"])
+
+    def test_an_unshown_candidate_sharing_the_rows_rule_still_blocks(self):
+        """A duplicate pre-pass record the batch never showed: the row's rule matches BOTH candidates,
+        so the split population keeps the k4pf1 refusal instead of a coin-flip binding."""
+        locations = {"aaaa1111bbbb2222": dict(self.LOCATIONS["aaaa1111bbbb2222"],
+                                             rule_id="unused-vendor-prefix"),
+                     "cccc3333dddd4444": self.LOCATIONS["cccc3333dddd4444"]}
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("does not single one out", refusals[0]["reason"])
+
+    def test_a_title_that_reads_as_the_unshown_candidate_contradicts_across_the_split(self):
+        """The k4pf1 contradiction rule does not stop at the batch boundary: a row whose rule names the
+        presented candidate but whose title reads as the unshown one has wavered between the two
+        populations, and neither reading may bind."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix", "title": "Vendor reset"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("do not name the same candidate", refusals[0]["reason"])
+
+
 class TestCoverageDiagnosticsStayQuietWhenTheyWouldBeNoise(unittest.TestCase):
     def test_a_nothing_cited_report_does_not_list_forty_five_ids(self):
         ids = [f"cand-{i}" for i in range(45)]
