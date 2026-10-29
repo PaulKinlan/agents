@@ -780,13 +780,15 @@ class TestGoEntryPointShapes(unittest.TestCase):
         }, f"every Go listener shape must be inventoried exactly once, got: {results}")
 
     def test_go_registration_shapes_beyond_verb_routes(self):
-        """agents-8egyo: the shapes the first Go pass still missed, from the reviewer's measured
-        repro - echo/gin's Any/Static/StaticFS/StaticFile/File/Match registrations, the Go 1.22
+        """agents-8egyo + agents-rpi6i: the shapes the first Go pass still missed, from both
+        reviewers' measured repros - echo/gin's Any/Static/StaticFS/StaticFile/File, the Go 1.22
         method-pattern mux.Handle("GET /x", h) (first argument starts with the METHOD, so the
-        leading-slash signal misses it while bare HandleFunc catches the same shape), and route
-        patterns in raw-string (backtick) literals. Line 5 (ALL-CAPS) and line 11 (bare
-        HandleFunc) are the already-covered baselines inside the same fixture: the pin proves the
-        new branches found the OTHER lines without breaking the old ones."""
+        leading-slash signal misses it while bare HandleFunc catches the same shape), route
+        patterns in raw-string (backtick) literals, and the METHOD-FIRST registrations whose
+        path is the SECOND argument: echo/gin Match([]string{...}, path, h), gin Handle with an
+        http.Method constant or a "GET" literal, and chi Method/MethodFunc. Line 5 (ALL-CAPS)
+        and line 11 (bare HandleFunc) are the already-covered baselines inside the same fixture:
+        the pin proves the new branches found the OTHER lines without breaking the old ones."""
         results = self._scan({
             "api/routes.go": (
                 "package api\n"                                     # 1
@@ -796,7 +798,7 @@ class TestGoEntryPointShapes(unittest.TestCase):
                 '\te.GET("/seen-baseline", h)\n'                    # 5
                 '\te.Any("/catch-all", h)\n'                        # 6
                 '\te.Static("/assets", "public")\n'                 # 7
-                '\te.Match("/multi", h)\n'                          # 8
+                '\te.Match([]string{"GET", "POST"}, "/multi", h)\n'  # 8
                 '\te.File("/health", "health.html")\n'              # 9
                 "\tmux := http.NewServeMux()\n"                     # 10
                 '\tmux.HandleFunc("POST /a", h)\n'                  # 11
@@ -806,14 +808,19 @@ class TestGoEntryPointShapes(unittest.TestCase):
                 '\tr.Any("/any", h)\n'                              # 15
                 '\tr.StaticFS("/fs", fs)\n'                         # 16
                 '\tr.StaticFile("/sf", "f")\n'                      # 17
-                "}\n"                                               # 18
+                '\tr.Handle(http.MethodGet, "/g", h)\n'             # 18
+                '\tr.Handle("GET", "/h", h)\n'                      # 19
+                "\tc := chi.NewRouter()\n"                          # 20
+                '\tc.Method(http.MethodGet, "/chi", h)\n'           # 21
+                '\tc.MethodFunc(http.MethodPost, "/chim", h)\n'     # 22
+                "}\n"                                               # 23
             ),
         })
         per_line = {}
         for r in results:
             self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
             per_line[r["line_number"]] = per_line.get(r["line_number"], 0) + 1
-        self.assertEqual(sorted(per_line), [5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17],
+        self.assertEqual(sorted(per_line), [5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22],
                          f"every Go registration shape must be inventoried, got: {results}")
         self.assertEqual(set(per_line.values()), {1},
                          f"exactly once per line - a shape matched by two branches double-emits, "
@@ -856,7 +863,10 @@ class TestGoEntryPointShapes(unittest.TestCase):
         not a route), `regexp.MatchString("GET /x")` (MatchString is not the Match method),
         `os.OpenFile("/tmp/x", ...)` (OpenFile is not the File method), `mux.Handle(pattern, h)`
         and `e.Any(route)` (variable patterns - the documented residual gap), and
-        `cfg.File("name")` (no leading-slash literal).
+        `cfg.File("name")` (no leading-slash literal). agents-rpi6i adds the traps for the
+        method-first branch and the path-first Match removal: `re.Match("/api/v1", buf)` (the
+        regexp package's shape - path-first .Match( is NOT a router registration) and
+        `e.Match(methods, route)` (a method-first call whose path is a variable, not a literal).
         """
         results = self._scan({
             "internal/ordinary/ordinary.go": (
@@ -879,17 +889,20 @@ class TestGoEntryPointShapes(unittest.TestCase):
             "internal/widened/widened.go": (
                 "package widened\n"
                 "\n"
-                "func widened(buf []byte, pattern string, route string) {\n"
+                "func widened(buf []byte, pattern string, route string, methods []string) {\n"
                 '\tok, _ := re.Match("^/api", buf)\n'
+                '\tok2, _ := re.Match("/api/v1", buf)\n'
                 '\tif regexp.MatchString("GET /x", string(buf)) {\n'
                 "\t\treturn\n"
                 "\t}\n"
                 '\tf, _ := os.OpenFile("/tmp/x", os.O_RDONLY, 0)\n'
                 "\tmux.Handle(pattern, h)\n"
                 "\te.Any(route, h)\n"
+                "\te.Match(methods, route)\n"
                 '\tname := cfg.File("name")\n'
                 "\t_ = f\n"
                 "\t_ = name\n"
+                "\t_ = ok2\n"
                 "}\n"
             ),
         })
