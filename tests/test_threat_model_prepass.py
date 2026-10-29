@@ -624,12 +624,13 @@ class TestPythonEntryPointShapes(unittest.TestCase):
                 "    os.popen(cmd).read()\n"
                 "    os.execv('/bin/echo', ['x'])\n"
                 "    os.posix_spawn('/bin/echo', [], {})\n"
+                "    os.posix_spawnp('echo', [], {})\n"
                 "    return asyncio.create_subprocess_shell(cmd)\n"
             ),
         })
         self.assertEqual(
             [(r["category"], r["line_number"]) for r in results],
-            [("code-execution", n) for n in range(6, 14)],
+            [("code-execution", n) for n in range(6, 15)],
             f"every Python spawn shape must be inventoried exactly once, got: {results}")
 
     def test_python_from_import_alias_forms_detected(self):
@@ -647,14 +648,16 @@ class TestPythonEntryPointShapes(unittest.TestCase):
             ),
             "app/aliases.py": (
                 "from subprocess import check_call, getstatusoutput\n"
-                "from os import posix_spawn, execve, spawnv, system\n"
+                "from os import posix_spawn, posix_spawnp, execve, spawnv, system\n"
                 "\n"
                 "check_call(['ls'])\n"
                 "getstatusoutput('ls')\n"
                 "posix_spawn('/bin/ls', ['ls'], {})\n"
+                "posix_spawnp('ls', ['ls'], {})\n"
                 "execve('/bin/ls', ['ls'], {})\n"
                 "spawnv(0, '/bin/ls', ['ls'])\n"
                 "system('ls')\n"  # bare system: deliberately NOT a match (agents-a2pke)
+                "posix_spawnproxy('ls', ['ls'], {})\n"  # lookalike: not an os sink
             ),
             "app/lookalikes.py": (
                 "class Shell:\n"
@@ -670,7 +673,7 @@ class TestPythonEntryPointShapes(unittest.TestCase):
         expected = sorted([
             ("app/srv.py", 2), ("app/srv.py", 3),
             ("app/aliases.py", 4), ("app/aliases.py", 5), ("app/aliases.py", 6),
-            ("app/aliases.py", 7), ("app/aliases.py", 8),
+            ("app/aliases.py", 7), ("app/aliases.py", 8), ("app/aliases.py", 9),
         ])
         self.assertEqual(got, expected,
                          "every distinctive alias form is inventoried exactly once, bare "
