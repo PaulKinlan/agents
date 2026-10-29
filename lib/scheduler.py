@@ -37,6 +37,20 @@ def _run_control(cmd, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, timeout=CONTROL_TIMEOUT_SECONDS, **kwargs)
 
 
+def _find_systemd_analyze() -> Optional[str]:
+    """Return the path to systemd-analyze, or None when external verification is off.
+
+    Set FACTORY_SKIP_SYSTEMD_ANALYZE=1 to skip the external `systemd-analyze verify` step;
+    the structural validation in validate_systemd_units always runs. The test suite sets it
+    so unit tests never depend on a live systemd-analyze, which pages in units from the
+    whole filesystem and stalls intermittently under load (agents-vqnfo). Operators can set
+    it on hosts where the tool is wedged.
+    """
+    if os.environ.get("FACTORY_SKIP_SYSTEMD_ANALYZE", "").strip().lower() in ("1", "true", "yes", "on"):
+        return None
+    return shutil.which("systemd-analyze")
+
+
 def get_launch_agents_dir() -> Path:
     """Return standard user launchd agents directory (~/Library/LaunchAgents)."""
     return Path.home() / "Library" / "LaunchAgents"
@@ -325,16 +339,29 @@ def validate_systemd_units(service_path: Path, timer_path: Path) -> Tuple[str, s
     if "[Install]" not in timer_content or "WantedBy=" not in timer_content:
         raise ValueError(f"Timer unit missing [Install] section or WantedBy directive: {timer_path}")
 
-    # If systemd-analyze is present, perform system-level verification
-    if shutil.which("systemd-analyze"):
-        res = _run_control(
-            ["systemd-analyze", "verify", str(service_path), str(timer_path)],
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        if res.returncode != 0:
-            raise ValueError(f"systemd-analyze verify failed: {res.stderr.strip() or res.stdout.strip()}")
+    # If systemd-analyze is present (and not skipped), perform system-level verification.
+    # Best-effort: the structural checks above are the contract. systemd-analyze pages in
+    # units from the whole filesystem and can stall past CONTROL_TIMEOUT_SECONDS on a loaded
+    # host; a wedged verifier must not refuse units that are structurally valid, so a timeout
+    # downgrades to a warning (agents-vqnfo). A real verify failure still raises.
+    analyzer = _find_systemd_analyze()
+    if analyzer:
+        try:
+            res = _run_control(
+                [analyzer, "verify", str(service_path), str(timer_path)],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"warning: systemd-analyze verify timed out after {CONTROL_TIMEOUT_SECONDS}s; "
+                "skipping external verification (structural checks passed)",
+                file=sys.stderr,
+            )
+        else:
+            if res.returncode != 0:
+                raise ValueError(f"systemd-analyze verify failed: {res.stderr.strip() or res.stdout.strip()}")
 
     return (service_content, timer_content)
 
