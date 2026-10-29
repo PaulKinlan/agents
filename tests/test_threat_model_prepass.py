@@ -537,7 +537,8 @@ class TestPythonEntryPointShapes(unittest.TestCase):
     ones that keep the inventory trustworthy.
 
     Deliberate residual gaps (documented at the pattern table): Django urls.py `path(...)`/
-    `re_path(...)` (names too generic to match bare) and Go listeners/spawns.
+    `re_path(...)` (names too generic to match bare). Go listeners/spawns were the other
+    documented gap and are now covered by agents-3734h - see TestGoEntryPointShapes.
     """
 
     def _scan(self, files):
@@ -705,6 +706,133 @@ class TestPythonEntryPointShapes(unittest.TestCase):
             ),
         })
         self.assertEqual(results, [], f"Python lookalikes are not sinks, got: {results}")
+
+
+class TestGoEntryPointShapes(unittest.TestCase):
+    """agents-3734h: the entry-point inventory must see Go listeners and spawns.
+
+    The scanner always WALKED .go files, but every ENTRY_POINT_PATTERNS regex was JS/TS-or-
+    Python-shaped, so a Go target's attack surface came back EMPTY - http.HandleFunc(,
+    http.ListenAndServe(, mux.HandleFunc(, gin/echo/chi route registrations, exec.Command(
+    and syscall.Exec( all went unseen. Same fix shape as agents-ombm8: the Go alternatives
+    are merged INTO the one regex per category (a second pair reusing a category double-emits
+    findings because matched_categories iterates the pair list), pinned here on both halves -
+    the Go sinks that must be found and the Go lookalikes that must stay quiet.
+
+    The precision signal for mixed-case verbs (chi/net/http) is a leading-slash string-literal
+    first argument, because bare `.Get(` is every Go getter; ALL-CAPS verb methods (gin/echo)
+    are matched bare, since exported GET/POST/... methods on a receiver are route
+    registrations. Residual gaps are documented at the pattern table.
+    """
+
+    def _scan(self, files):
+        """Same throwaway-tree helper as TestPythonEntryPointShapes: auto-detection answers
+        third-party (no git identity), so no suppression is in play and the assertions are
+        deterministic."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for rel, code in files.items():
+                fpath = tmp_path / rel
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                fpath.write_text(code, encoding="utf-8")
+            return mine_history.scan_entry_points(tmp_path)
+
+    def test_go_listeners_detected(self):
+        results = self._scan({
+            "cmd/server/main.go": (
+                "package main\n"
+                "\n"
+                'import "net/http"\n'
+                "\n"
+                "func main() {\n"
+                "\tmux := http.NewServeMux()\n"
+                '\thttp.HandleFunc("/health", healthHandler)\n'
+                '\tmux.HandleFunc("/items", itemsHandler)\n'
+                '\tmux.Handle("/legacy", legacyHandler)\n'
+                '\tgo http.ListenAndServe(":8080", mux)\n'
+                '\thttp.ListenAndServeTLS(":443", cert, key, mux)\n'
+                "\thttp.Serve(listener, mux)\n"
+                "}\n"
+            ),
+            "internal/api/routes.go": (
+                "package api\n"
+                "\n"
+                "func registerRoutes() {\n"
+                "\tr := gin.Default()\n"
+                '\tr.GET("/items", listItems)\n'
+                '\tr.POST("/items", createItem)\n'
+                "\te := echo.New()\n"
+                '\te.PUT("/items/:id", updateItem)\n'
+                "\tc := chi.NewRouter()\n"
+                '\tc.Get("/items", listItems)\n'
+                '\tc.Post("/items", createItem)\n'
+                '\tc.Route("/api", mountAPI)\n'
+                "}\n"
+            ),
+        })
+        by_file = {}
+        for r in results:
+            self.assertEqual(r["category"], "server-listener", f"unexpected category: {r}")
+            by_file.setdefault(r["path"], []).append(r["line_number"])
+        self.assertEqual(by_file, {
+            "cmd/server/main.go": [7, 8, 9, 10, 11, 12],
+            "internal/api/routes.go": [5, 6, 8, 10, 11, 12],
+        }, f"every Go listener shape must be inventoried exactly once, got: {results}")
+
+    def test_go_spawns_detected(self):
+        results = self._scan({
+            "internal/runner/run.go": (
+                "package runner\n"
+                "\n"
+                "import (\n"
+                '\t"os"\n'
+                '\t"os/exec"\n'
+                '\t"syscall"\n'
+                ")\n"
+                "\n"
+                "func runAll(ctx context.Context, name string) {\n"
+                '\tc := exec.Command("sh", "-c", name)\n'
+                '\tc2 := exec.CommandContext(ctx, "ls")\n'
+                '\tsyscall.Exec("/bin/ls", []string{"ls"}, env)\n'
+                '\tsyscall.ForkExec("/bin/ls", argv, attr)\n'
+                '\tos.StartProcess("/bin/ls", argv, attr)\n'
+                "}\n"
+            ),
+        })
+        self.assertEqual(
+            [(r["category"], r["line_number"]) for r in results],
+            [("code-execution", n) for n in (10, 11, 12, 13, 14)],
+            f"every Go spawn shape must be inventoried exactly once, got: {results}")
+
+    def test_go_lookalikes_stay_quiet(self):
+        """Precision half: ordinary Go must not enter the attack-surface inventory.
+
+        The pinned false-positive traps: `cache.Get(key)` (no literal), `viper.GetString("k")`
+        (not the verb method), `http.Get("https://...")` (outbound client fetch - its literal
+        is not a leading-slash route pattern), `env.Get("key", "default")` (config getter with
+        a non-path literal), `&cobra.Command{...}` (struct literal, not an exec.Command call)
+        and `cmd.Start` (the sink is already inventoried at its exec.Command line).
+        """
+        results = self._scan({
+            "internal/ordinary/ordinary.go": (
+                "package ordinary\n"
+                "\n"
+                "func ordinary(ctx context.Context, client *http.Client) {\n"
+                "\tv := cache.Get(key)\n"
+                '\ts := viper.GetString("key")\n'
+                '\tresp, err := http.Get("https://api.example.com/x")\n'
+                "\tif err != nil {\n"
+                "\t\treturn\n"
+                "\t}\n"
+                "\tdefer resp.Body.Close()\n"
+                '\tfallback := env.Get("key", "default")\n'
+                '\tcmd := &cobra.Command{Use: "tool"}\n'
+                "\t_ = cmd.Start\n"
+                "\tclient.Do(req)\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(results, [], f"Go lookalikes are not sinks, got: {results}")
 
 
 class TestSelfTargetRepositoryIdentity(unittest.TestCase):
