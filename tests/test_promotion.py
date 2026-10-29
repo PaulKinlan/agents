@@ -25,10 +25,10 @@ ROOT = Path(__file__).resolve().parent.parent
 # THE ARITHMETIC ACTUALLY USED, stated so the next operator re-derives the real number and not a
 # formula the constant never satisfied (agents-jdofv): 4x the 28.0s measurement is 112s, taken to
 # 120s - the top of the bead's 90-120s range. The +42% in-gate contention this VM measured is NOT
-# added on top of the 4x (that formula would ask for 28.0 x 4 x 1.42 = 159s); it is ABSORBED by the
-# rounding, because 120s still clears the >=3x guard below against the CONTENDED run: 28.0 x 1.42 =
-# 39.8s, and 120 / 39.8 = 3.02x. If contention ever exceeds that, the guard fails with the
-# measurement in its message - which is the point of keeping the two numbers separate.
+# added on top of the 4x (that formula would ask for 28.0 x 4 x 1.42 = 159s). At the observed
+# contention factor, 28.0 x 1.42 = 39.8s and 120 / 39.8 = 3.02x. The guard below compares only
+# constants (120 >= 3 x 28.0 = 84); it does not re-measure contention. A run exceeding 120s hits
+# the subprocess timeout; the guard changes only when the recorded standalone measurement is updated.
 # It is a hang guard, not a sleep - a generous bound only delays detecting a real hang. If the
 # promote path ever gets fast, lower it HERE, in one place.
 _CLI_GUARD_S = 120
