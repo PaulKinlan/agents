@@ -1342,6 +1342,34 @@ class TestATransientBatchFailureIsRetriedOnce(ContextPruningStation):
         self.assertIn("Could not parse", retries[0]["parse_failure"])
         self.assertIn("schema", retries[1]["parse_failure"])
         self.assertTrue((run / "schema_errors.batch3.attempt1.json").exists())
+        # agents-hqqan: the first rejected output's RAW BYTES survive the retry for BOTH rejection
+        # classes. The schema class (batch3) always kept attempt-tagged rejected_report/
+        # schema_errors artifacts; a pure parse failure (batch2) kept only the size and the reason
+        # in batch_retries.json, so its first output was unrecoverable. The rename-site aside
+        # keeps it under the rejected_* naming convention - deliberately NOT
+        # model_output.batch2.attempt1.txt, because the merge globs model_output.batch*.txt and
+        # would read such an aside back AS a batch answer; the glob-purity assertion below pins
+        # exactly that.
+        run_files = sorted(p.name for p in run.iterdir())
+        aside2 = run / "rejected_model_output.batch2.attempt1.txt"
+        self.assertTrue(aside2.exists(),
+                        f"the parse-rejected first output must stay inspectable: {run_files}")
+        self.assertIn('{"summary":notQuoted', aside2.read_text(encoding="utf-8"),
+                      "the aside must hold the first attempt's own rejected bytes")
+        aside3 = run / "rejected_model_output.batch3.attempt1.txt"
+        self.assertTrue(aside3.exists(),
+                        f"the schema-rejected first output must stay inspectable: {run_files}")
+        self.assertNotIn('"target"', aside3.read_text(encoding="utf-8"),
+                         "batch3's aside must be the schema-invalid first answer (target "
+                         "stripped), not a copy of the retry's")
+        answer2 = (run / "model_output.batch2.txt").read_text(encoding="utf-8")
+        self.assertIn("cand-perf-003", answer2)
+        self.assertNotIn("notQuoted", answer2,
+                         "the canonical batch answer must be the RETRY's, not the rejected first")
+        self.assertEqual(sorted(p.name for p in run.glob("model_output.batch*.txt")),
+                         ["model_output.batch1.txt", "model_output.batch2.txt",
+                          "model_output.batch3.txt"],
+                         "the merge glob must see exactly the three canonical answers - no aside")
         for batch, error in ((2, "Could not parse"), (3, "schema")):
             retry_prompt = (run / f"prompt.batch{batch}.retry1.txt").read_text(encoding="utf-8")
             self.assertIn(error, retry_prompt)
