@@ -1211,6 +1211,11 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         ("perf-review",
          "The migration to asyncio.gather would cut the p99 latency of the loader.",
          "Consider the fan-out."),
+        # agents-4rk3x (round-3 reviewer, P3): the benchmark marker can PRECEDE the match in the same
+        # clause, so the evidence check has to look back to the clause start, not only forward.
+        ("perf-review",
+         "As measured in the benchmark, switching the loader to asyncio.gather should cut p99 latency.",
+         "Consider the fan-out."),
     )
 
     # agents-3lr9o's third row is DELIBERATELY still classified as advice, and pinned that way so a
@@ -1255,6 +1260,13 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         # finite predicate after the shape, so neither may be reclassified as a description.
         "To reduce latency, use Promise.all; the calls are independent.",
         "We could run these in parallel; the calls are independent.",
+        # agents-rk2y7 (round-3 reviewer, P2): a SUBORDINATE clause carries its own subject and verb, so
+        # a finite predicate after "when/where/if" is not evidence against the imperative. These were
+        # flipped True->False by the agents-3lr9o subject test - the direction where an unguarded
+        # recommendation ships - and must stay True.
+        "To reduce latency, use Promise.all when tasks are independent.",
+        "For the loader, use Promise.all where items are processed independently.",
+        "To reduce latency, use Promise.all if the calls are independent.",
         # impl-cygm4 measured 'would' swallowing soft advice on main 23b64372: 'would' was in no opener,
         # so the cue was never clause-initial under any shape, and all six cases below were False in the
         # description field while "We could use ..." was True in the identical frame. Missing advice ships

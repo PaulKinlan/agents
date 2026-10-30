@@ -468,6 +468,18 @@ _A3_MATCH_PATTERN = re.compile(
 )
 
 
+# agents-rk2y7: a finite predicate only makes the cue a noun-phrase SUBJECT when it is the clause's own
+# predicate. A subordinate clause carries its own subject and verb - "To reduce latency, use Promise.all
+# WHEN TASKS ARE independent", "... WHERE ITEMS ARE processed independently" - and treating that verb as
+# evidence against the imperative dropped genuine advice, which is the direction where an unguarded
+# recommendation ships. So the subject test looks only at the clause up to its first subordinator.
+_SUBORDINATE_CLAUSE_SPLIT = re.compile(
+    r"\b(?:when|whenever|where|whereas|if|unless|because|since|while|that|which|who|whom|whose|after|"
+    r"before|once|until|as|so|but|and|or)\b",
+    re.IGNORECASE
+)
+
+
 def _has_concurrency_advice_role(text: str) -> bool:
     """True when some clause in `text` puts the concurrency shape in an ADVICE role (agents-ekrw4).
 
@@ -488,14 +500,21 @@ def _has_concurrency_advice_role(text: str) -> bool:
         # sentence: a predicate or a benchmark note in the NEXT clause is not evidence about this one.
         clause_tail = re.match(r"[^.;\n]*", text[match.end():]).group(0)
         match_text = text[match.start():match.end()] + clause_tail
-        if _EVIDENCE_REPORT_MARKER_PATTERN.search(match_text):
+        # agents-4rk3x: the marker can PRECEDE the match in the same clause - "As measured in the
+        # benchmark, switching the loader to asyncio.gather should cut p99 latency" - so the lookback is
+        # limited to the current clause (after the last sentence or clause terminator) and searched with
+        # the match. Looking only forward from match.start() let that report through as advice.
+        lookback = re.split(r"[.;\n]", text[max(0, match.start() - 80):match.start()])[-1]
+        if _EVIDENCE_REPORT_MARKER_PATTERN.search(lookback + match_text):
             continue
         # The anchor is part of the MATCH (the alternation consumes the comma), so read it from the
         # match rather than from the text before it - the first cut looked at the preceding character
         # and saw the "e" of "stage", which is why this case stayed True through an earlier round.
         anchored_by_comma = match.group(0).lstrip()[:1] in (",", ":")
-        if anchored_by_comma and _FINITE_PREDICATE_AFTER_MATCH_PATTERN.search(clause_tail):
-            continue
+        if anchored_by_comma:
+            head = _SUBORDINATE_CLAUSE_SPLIT.split(clause_tail)[0]
+            if _FINITE_PREDICATE_AFTER_MATCH_PATTERN.search(head):
+                continue
         # agents-c9w4t: an a3 match whose shape is the OBJECT of a change noun is an outcome report.
         # Only a3 can be fooled this way, because only a3 matches starting AT the shape - an a1/a4 match
         # carries its subject and cue, so the change noun cannot be mistaken for the shape's own clause.
