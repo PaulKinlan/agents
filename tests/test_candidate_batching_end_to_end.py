@@ -1390,5 +1390,56 @@ class TestATransientBatchFailureIsRetriedOnce(ContextPruningStation):
         self.assertFalse(retries[1]["retried"])
         self.assertIn("already retried once", retries[1]["not_retried_because"])
 
+
+# agents-5eq13: the batch-2 call HANGS past its own per-call allowance on the FIRST attempt (killed
+# by the dispatcher's timeout with no answer - the same transient no-output shape as FLAKY_STUB's
+# exit 1, reached through StationTimeout instead of a return code). The retry must answer and the
+# station must complete with every batch merged: before the fix the timeout's raise flew past the
+# agents-h53yp retry machinery and one timed-out batch lost the whole station (docs-drift batch 6/7
+# in the paul-kinlan-me audit, log:398). State channel: PI_CODING_AGENT_DIR, as for FLAKY_STUB.
+HANG_ONCE_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+marker="${PI_CODING_AGENT_DIR:-/nonexistent}/hang-once-attempted"
+if [[ "$prompt" == *cand-perf-003* && ! -e "$marker" ]]; then
+  printf '' > "$marker" || { echo 'stub cannot record its first attempt' >&2; exit 9; }
+  sleep 40
+fi
+""" + _ROWS_BODY + r"""printf '%s]}\n' "$out"
+"""
+
+
+class TestATimedOutBatchIsRetriedOnce(BatchedStation):
+    """agents-5eq13: one per-batch timeout is transient; the retry's answer must save the station."""
+
+    def test_a_batch_that_times_out_once_is_retried_and_the_run_completes(self):
+        # 0.5 min per call (the pinned test clock, agents-k4pf1): the 40 s hang outlasts ONE
+        # declaration and is killed at ~30 s; the retry answers in a couple of seconds.
+        self.agent(SHORT_DECLARED_BUDGET_YAML)
+        self.stub(HANG_ONCE_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0,
+                         "a single per-batch timeout is transient: the retry's answer must "
+                         "complete the station: " + res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([f["candidate_id"] for f in report["findings"]],
+                         [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
+                         "every batch is merged after the timed-out batch's retry")
+
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["batch"], r["attempt"], r["retried"]) for r in retries],
+                         [(2, 1, True)], retries)
+        self.assertEqual(retries[0]["exit_code"], 124,
+                         "the timeout-kill convention, recorded as the batch failure")
+        self.assertEqual(retries[0]["output_bytes"], 0,
+                         "a killed call left no answer to merge")
+        self.assertIn("exceeded its", retries[0]["stderr_tail"] or "",
+                      "the record carries the timeout's own reason")
+        # the retried call's answer is the one the merge saw
+        answer = (run / "model_output.batch2.txt").read_text(encoding="utf-8")
+        self.assertIn("cand-perf-003", answer)
+
+
 if __name__ == "__main__":
     unittest.main()
