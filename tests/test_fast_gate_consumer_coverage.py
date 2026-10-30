@@ -1008,6 +1008,46 @@ class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
         )
 
 
+def _literal_timeout_bounds(source):
+    """Every timeout bound in `source` that is a VALUE rather than a reference to a named constant.
+
+    AST, NOT A REGEX (agents-cygm4). The regex this replaces governed only the spellings it
+    enumerated, so a reviewer-measured `timeout=(60)` - the exact shape Black produces when it
+    splits a long call - passed the guard in silence, as did a wrapped `timeout=\n    (60)`. A
+    spelling list can always be walked around; the tree cannot. Parentheses, line breaks,
+    arithmetic (`timeout=30 * 2`), f-strings and `**{...}` spreads all collapse to the same node,
+    so the contract below is one rule instead of a growing list of patterns. Every spelling is
+    pinned as a mutant in TestTheTimeoutGuardItself.
+
+    Prose is not counted (the agents-kevst lesson, done exactly): the regex era could only
+    approximate that by dropping full-line comments, so a literal quoted in a docstring still
+    tripped it. A string is not a bound - what this pins is executable code, and the AST is
+    precisely that.
+
+    `timeout` must be a bare `ast.Name` (the module-level constant). A `Name` holding a computed
+    local would pass too, which is the line drawn here: the point is that the bound is NAMED and
+    sited, not that its arithmetic is re-checked by the test.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg == "timeout" and not isinstance(keyword.value, ast.Name):
+                    found.append(ast.unparse(keyword.value))
+        elif isinstance(node, ast.Dict):
+            # The dict-spread spelling: `**{"check": True, "timeout": 60}`. Walking every dict
+            # also catches a bounds dict built on one line and spread on the next, which the
+            # regex (like the spread it targeted) could not follow.
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "timeout"
+                    and not isinstance(value, ast.Name)
+                ):
+                    found.append(ast.unparse(value))
+    return sorted(found)
+
+
 class TestGateCliTimeoutPolicy(unittest.TestCase):
     """Bounds on this file's subprocess calls are sized from measurement, once PER CALL CLASS
     (agents-4jqna, agents-5bpe4): _GATE_CLI_GUARD_S for tools/fast-gate.sh invocations,
@@ -1021,25 +1061,22 @@ class TestGateCliTimeoutPolicy(unittest.TestCase):
     def test_no_literal_timeout_remains_in_this_file(self):
         """A reintroduced literal is how a file ends up with several bounds for the same CLI.
 
-        The contract (agents-5bpe4): NO bare numeric timeout literal may appear in a code line;
+        The contract (agents-5bpe4): NO numeric timeout VALUE may appear in this file's code;
         every subprocess bound references a module-level named constant, one per call class -
         _GATE_CLI_GUARD_S for tools/fast-gate.sh invocations, _LOCAL_GIT_GUARD_S for local git
-        plumbing. The scan is whitespace-tolerant ('timeout = NN' is the same literal as the
-        no-space spelling; agents-aau00 landed that widening for tests/test_sinks.py) and it
-        covers the dict-spread spelling too (a quoted 'timeout' KEY carrying a numeric value),
-        which the bare-kwarg pattern missed entirely. Both were reviewer-measured mutants that
-        the old scan silently passed - a guard that misses its mutant is no guard at all.
+        plumbing.
+
+        THE SCAN IS AST-BASED, NOT A REGEX (agents-cygm4). The regex era enumerated spellings:
+        'timeout = NN' (agents-aau00) and the quoted dict KEY (agents-5bpe4) were each added after
+        a reviewer-measured mutant, and the next mutant - `timeout=(60)`, the exact shape Black
+        produces when it splits a long call - still passed in silence while this docstring claimed
+        "NO bare numeric timeout literal". A spelling list invites the next counter-example; the
+        AST does not have one, because every parenthesised, wrapped, computed or spread spelling is
+        the same node it already rejects. The mutants are pinned as data in
+        TestTheTimeoutGuardItself, so this green is only green while a reintroduced literal reddens it.
         """
         source = (ROOT / "tests" / "test_fast_gate_consumer_coverage.py").read_text(encoding="utf-8")
-        # COUNT CODE, NOT PROSE (the agents-kevst lesson): only full-line comments are dropped, so a
-        # literal quoted in a TRAILING comment or in a docstring still trips the scan. The pattern is
-        # [0-9.]+ rather than integer-only: a float literal is the same drift with different
-        # punctuation. Neither pattern matches its own source line: after the word 'timeout' the
-        # kwarg pattern's source has a backslash (not whitespace-then-'='), and the dict pattern's
-        # source has a bracket (not a quote) - verified against the reviewer's REPRO mutants.
-        code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
-        literals = re.findall(r"timeout\s*=\s*([0-9.]+)", code)
-        literals += re.findall(r"[\"']timeout[\"']\s*:\s*([0-9.]+)", code)
+        literals = _literal_timeout_bounds(source)
         self.assertEqual(
             literals, [],
             "every subprocess bound in this file must reference a named constant - "
@@ -1084,6 +1121,60 @@ class TestGateCliTimeoutPolicy(unittest.TestCase):
             f"_LOCAL_GIT_GUARD_S={_LOCAL_GIT_GUARD_S} must stay below "
             f"_GATE_CLI_GUARD_S={_GATE_CLI_GUARD_S}: local git plumbing is sub-0.1s work and must "
             "never be sized by the gate CLI's O(startup) measurement (agents-5bpe4)")
+
+
+class TestTheTimeoutGuardItself(unittest.TestCase):
+    """The no-literal guard is only worth its green if a reintroduced literal reddens it.
+
+    agents-cygm4: the regex guard was widened twice (agents-aau00, agents-5bpe4) and each widening
+    was found by a REVIEWER-MEASURED mutant rather than by the test itself, which is the tell that
+    the guard had no mutants of its own. Each spelling below is a specific counter-example that
+    either slipped past the regex era or that the AST earns for free; they are data, so widening
+    or narrowing the guard means editing a case here instead of reasoning about a pattern.
+    """
+
+    CAUGHT = {
+        "bare literal": "run(cmd, timeout=60)",
+        "spaced assignment": "run(cmd, timeout = 60)",
+        "float literal": "run(cmd, timeout=0.5)",
+        # The mutant that opened agents-cygm4: parenthesised, and the Black-split shape of it.
+        "parenthesised": "run(cmd, timeout=(60))",
+        "black-split": "run(\n    cmd,\n    check=True,\n    timeout=(\n        60\n    ),\n)",
+        "expression": "run(cmd, timeout=30 * 2)",
+        "dict-spread": 'run(cmd, **{"check": True, "timeout": 60})',
+        "dict-built-then-spread": 'bounds = {"timeout": 60}\nrun(cmd, **bounds)',
+    }
+
+    ALLOWED = {
+        "named constant": "run(cmd, timeout=_LOCAL_GIT_GUARD_S)",
+        "named constant in a dict": (
+            'run(cmd, **{"check": True, "timeout": _GATE_CLI_GUARD_S})'
+        ),
+        # Prose is not a bound: the regex era could only approximate that by dropping comment
+        # lines, so a docstring quoting a literal tripped it.
+        "prose": 'MESSAGE = "call it with timeout=60 next time"',
+    }
+
+    def test_every_measured_mutant_is_caught(self):
+        """A guard that misses its mutant is no guard at all - so the mutants live here as tests."""
+        for spelling, snippet in self.CAUGHT.items():
+            with self.subTest(spelling=spelling):
+                self.assertTrue(
+                    _literal_timeout_bounds(snippet),
+                    f"the timeout guard is silent on the '{spelling}' spelling: {snippet!r}. This "
+                    "is exactly the agents-cygm4 gap (a parenthesised literal passed a regex that "
+                    "claimed to forbid every bare literal) - fix the guard, not this assertion",
+                )
+
+    def test_named_constants_and_prose_stay_clean(self):
+        """The guard must be precise as well as complete, or it reddens on correct code."""
+        for case, snippet in self.ALLOWED.items():
+            with self.subTest(case=case):
+                self.assertEqual(
+                    _literal_timeout_bounds(snippet),
+                    [],
+                    f"{case} must not be flagged: {snippet!r}",
+                )
 
 
 def tearDownModule():
