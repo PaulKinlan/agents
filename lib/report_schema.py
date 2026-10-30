@@ -268,29 +268,96 @@ _CLAUSE_START_CONNECTOR_PATTERN = re.compile(
     re.IGNORECASE | re.MULTILINE
 )
 
+# CODE PASSES THROUGH THE GUARD VERBATIM (agents-obqph / agents-hgiui). A fence or inline span that
+# ends with the target language's own `else` is not an English connector, and rewriting it publishes a
+# remediation a human is meant to paste as invalid code. Two shapes are read as code, and BOTH readers
+# below - the validator (_clause_start_connector) and the rewrite (_paraphrase_clause_start_connectors)
+# - decide through _connector_is_prose(), the same instrument, so the guard cannot paraphrase one form
+# while its validator still treats the other as prose:
+#   * inside a fenced block or an inline `code span` (an unterminated fence runs to end of text);
+#   * a connector that opens a CODE clause - the keyword is followed by a call-shaped token such as
+#     "await run(" or "process.nextTick(" - which is how an unmarked snippet in prose looks.
+_CODE_SEGMENT_PATTERN = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
+_CODE_CLAUSE_PATTERN = re.compile(r"\s*(?:await\s+)?[A-Za-z_$][\w$.]*\s*\(")
+
+
+def _code_segments(text: str):
+    """(start, end) spans of fenced blocks and inline code spans in `text`."""
+    return [m.span() for m in _CODE_SEGMENT_PATTERN.finditer(text)]
+
+
+def _in_code_segment(text: str, position: int, segments=None) -> bool:
+    for start, end in (_code_segments(text) if segments is None else segments):
+        if start <= position < end:
+            return True
+    return False
+
+
+def _connector_is_prose(text: str, match, segments=None) -> bool:
+    """True when this otherwise/else is the English connector and not the language's keyword."""
+    if _in_code_segment(text, match.start(2), segments):
+        return False
+    return _CODE_CLAUSE_PATTERN.match(text, match.end(2)) is None
+
+
+# A text-final otherwise/else opens no clause: paraphrased it leaves a fragment ("Use Promise.all; if
+# not; otherwise preserve serial execution" - agents-obqph), so the connector is dropped instead.
+_DANGLING_PROSE_CONNECTOR_PATTERN = re.compile(r"[;.,]?[ \t]*(?:otherwise|else)[ \t]*$", re.IGNORECASE)
+_DANGLING_CONNECTOR_WORD = re.compile(r"(?:otherwise|else)\b", re.IGNORECASE)
+
+
+def _strip_dangling_prose_connector(text: str, segments=None) -> str:
+    """Drop a text-final PROSE otherwise/else; code keeps the keyword (agents-hgiui)."""
+    dangling = _DANGLING_PROSE_CONNECTOR_PATTERN.search(text)
+    if not dangling:
+        return text
+    word = _DANGLING_CONNECTOR_WORD.search(dangling.group())
+    if word and _in_code_segment(text, dangling.start() + word.start(), segments):
+        return text
+    return text[: dangling.start()].rstrip()
+
 
 def _clause_start_connector(text: str, start: int = 0):
-    """First clause-start otherwise/else at or after `start` (group 2 is the connector word)."""
-    return _CLAUSE_START_CONNECTOR_PATTERN.search(text, start)
+    """First PROSE clause-start otherwise/else at or after `start` (group 2 is the connector word)."""
+    segments = _code_segments(text)
+    for match in _CLAUSE_START_CONNECTOR_PATTERN.finditer(text, start):
+        if _connector_is_prose(text, match, segments):
+            return match
+    return None
 
 
 def _paraphrase_clause_start_connectors(text: str) -> str:
-    """Restate clause-start otherwise/else as "if not,", preserving every clause's own words.
+    """Restate PROSE clause-start otherwise/else as "if not,", preserving every clause's own words.
 
     Used on text the guard is about to place inside the IF-reentrant branch it adds: kept verbatim,
     a local "otherwise" could be misread (by a reader, and by the validator) as that added IF's
     fallback. "if not" keeps the clause's antecedent - the local instruction it already followed -
     and the paraphrase decides nothing from the words that follow the connector.
+
+    Code is never rewritten (agents-obqph / agents-hgiui): fenced blocks, inline spans and a connector
+    that opens a code clause are copied through byte for byte, and a text-final connector is dropped
+    rather than paraphrased into a clause that does not exist.
     """
     text = re.sub(r"\botherwise known as\b", "also known as", text, flags=re.IGNORECASE)
+    segments = _code_segments(text)
+    text = _strip_dangling_prose_connector(text, segments)
 
-    def _repl(m):
-        sep = m.group(1)
+    pieces: list = []
+    last = 0
+    for match in _CLAUSE_START_CONNECTOR_PATTERN.finditer(text):
+        if not _connector_is_prose(text, match, segments):
+            continue
+        sep = match.group(1)
         connector = "If not, " if not sep.rstrip() or sep.rstrip().endswith(".") else "if not, "
-        return sep + connector
-
-    return re.sub(r"(^|[;.,]\s*)(?:otherwise|else)\b[ \t]*", _repl, text,
-                  flags=re.IGNORECASE | re.MULTILINE)
+        pieces.append(text[last:match.start()])
+        pieces.append(sep + connector)
+        last = match.end()
+        # The rewrite absorbs the connector's own trailing separator and whitespace, as the regex it
+        # replaces did - and one comma too, so "Otherwise, run them serially" does not become
+        # "If not, , run them serially" (a doubled separator in text a human reads).
+        last += re.match(r"[ \t]*,?[ \t]*", text[last:]).end()
+    pieces.append(text[last:])
+    return "".join(pieces)
 
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
