@@ -502,8 +502,6 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
 
     # Fallback to title/description only for affirmative recommendations, not hazard/vulnerability warnings (Reviewer P2)
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
-    if _DESCRIPTIVE_HAZARD_PATTERN.search(text):
-        return False
     # A MENTION IS NOT ADVICE (agents-ekrw4). `_EXECUTION_CONCURRENCY_PATTERN` treats a bare
     # `Promise.all`/`asyncio.gather` as a recommendation, which is right for a REMEDIATION or an added
     # diff line - there the fix itself proposes concurrency - but wrong for prose that only reports
@@ -512,7 +510,19 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     # Promise.all on the batch" is not, and the difference is grammar, not vocabulary. Recall is kept
     # by the imperative and advisory-modal roles below; precision is measured by the corpus in
     # tests/test_perf_review.py::TestADescriptiveMentionIsNotAdvice.
-    return bool(_CONCURRENCY_ADVICE_ROLE_PATTERN.search(text))
+    #
+    # ORDER MATTERS, AND ADVICE IS TESTED FIRST (agents-ekrw4, reported by impl-cygm4). A
+    # recommendation very often gives the hazard as its REASON - "Use a worker pool so requests don't
+    # exhaust the socket pool" - so a hazard veto evaluated first would suppress exactly the findings
+    # that must stay guarded, turning the harm verbs added for precision into a recall hole. Hazard
+    # suppression is therefore the answer only when nothing in the sentence advises: it still vetoes
+    # "Concurrent execution of inference sessions is unsafe", because a hazard predicate is not an
+    # advisory role in any of the shapes above.
+    if _CONCURRENCY_ADVICE_ROLE_PATTERN.search(text):
+        return True
+    if _DESCRIPTIVE_HAZARD_PATTERN.search(text):
+        return False
+    return False
 
 
 # Domains and primitives where concurrency is often non-reentrant or stateful

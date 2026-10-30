@@ -1234,6 +1234,42 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
                 ))
 
 
+    def test_advice_outranks_a_hazard_reason_in_the_same_sentence(self):
+        """agents-ekrw4 ordering (reported by impl-cygm4): the hazard list must not veto real advice.
+
+        A recommendation usually gives the hazard as its REASON. If the hazard test ran first, the
+        harm verbs added for precision would create a recall hole in exactly the findings that must
+        stay guarded - the fix would be its own counterexample. Advice is therefore tested first, and
+        hazard suppression only answers when nothing in the sentence advises.
+        """
+        for description in (
+            "Use a worker pool so requests don't exhaust the socket pool.",
+            "Run these in parallel so the batch does not starve the queue.",
+            "Use Promise.all here; unbounded fan-out saturates the socket pool.",
+            "We should fan these out with a worker pool before the retry storm overwhelms it.",
+        ):
+            with self.subTest(description=description):
+                finding = {"rule_id": "perf-review", "description": description}
+                self.assertTrue(
+                    is_concurrency_recommendation(dict(finding)),
+                    "advice that names its hazard as the reason was suppressed by the hazard test"
+                )
+                self.assertEqual(
+                    len(unpreconditioned_concurrency_findings({"findings": [dict(finding)]})), 1,
+                    "advice with a hazard reason must still carry the reentrancy precondition"
+                )
+        # The other side of the order: an AVOIDANCE framed with a hazard stays descriptive, because
+        # the cue is not clause-initial and no advisory modal governs the shape.
+        for description in (
+            "Never use Promise.all; it exhausts the connection pool.",
+            "Do not use Promise.all here, the fan-out saturates the socket pool.",
+        ):
+            with self.subTest(description=description):
+                self.assertFalse(is_concurrency_recommendation(
+                    {"rule_id": "perf-review", "description": description}
+                ))
+
+
 class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
     """agents-gjm4n / agents-3t9oz: "otherwise" states a CONSEQUENCE at least as often as a fallback.
 
