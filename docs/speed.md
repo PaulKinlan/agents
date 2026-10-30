@@ -29,11 +29,17 @@ CHECK_FAST_TIMEOUT=2400
 All four are **measurements now, and pinned as such**: `tests/test_check_conf_consistency.py`
 (`TestTheEnforcedBoundsCoverTheWallsTheContractRecords`) reads the worst walls §2 records and fails if a
 bound is shorter than the wall beside it, or if the ordering `module < budget < CHECK_TIMEOUT` breaks.
-Before `agents-2rv7c` every one of them was a derivation — two said so in their own comments
-(`tools/full-gate.sh`: "A DERIVATION, NOT A MEASURED FULL-GATE WALL"; `tools/check.conf`: "the durable fix
-is to measure one and pin THIS number to it") — and nothing compared them with the host, so the numbers
-that actually produced verdicts lived only in an untracked per-VM `~/.fleet/check.conf` that `install.sh`'s
-`--install --global` reverts. Re-measure with §7 and move the bounds **in the same commit**.
+Before `agents-2rv7c` three of the four were derivations or sized on a standalone run, and one was not.
+`FULL_GATE_MODULE_TIMEOUT_S` 1500 was sized on the module's 1206.3s **standalone** wall, which is why it
+was short inside a sharded gate; `FULL_GATE_BUDGET_S` 3300 was the derivation its own comment named ("A
+DERIVATION, NOT A MEASURED FULL-GATE WALL ... that measurement is still missing"), summed from the cost
+table; `CHECK_TIMEOUT` 3600 was self-declared too ("DERIVATION, NOT A MEASUREMENT ... the durable fix is to
+measure one and pin THIS number to it"). Nothing compared any of them with the host, so the numbers that
+actually produced verdicts lived only in an untracked per-VM `~/.fleet/check.conf` that `install.sh`'s
+`--install --global` reverts. `CHECK_FAST_TIMEOUT` 2400 is the one that did not move, because it was
+already sized on measured inputs - mapping's 1206.3s run plus its eleven siblings' measured 981.9s, which
+the 117 fast gates in this window agree with (worst `run_s` 2000s). Re-measure with §7 and move the bounds
+**in the same commit**.
 
 `FULL_GATE_SHARDS` (default `min(4, os.cpu_count())`) is not a budget but the divisor the wall is paid
 through; §4 is its arithmetic.
