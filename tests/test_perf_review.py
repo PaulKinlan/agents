@@ -1371,6 +1371,27 @@ class TestDescriptiveProseKeepsItsGuard(unittest.TestCase):
                 self.assertTrue(is_concurrency_recommendation(self.finding(remediation)),
                                 "narrowing the description side must not cost the advice side")
 
+    def test_a_would_modal_still_carries_advice_in_the_description(self):
+        """agents-s2ywu: the shape that will fix agents-mjhp6 must not take these with it.
+
+        agents-mjhp6 removes the outcome-report false positive ("The change to Promise.all would
+        reduce memory usage in the batch stage.") by keying on the change-noun subject. The same
+        modal carries genuine advice in the description field, and those rows are TRUE on main
+        today - so they are pinned here as the guard on that fix. Deliberately NOT pinned: the six
+        soft-advice "would" rows that are currently FALSE ("We would use Promise.all for these
+        fetches." and friends) - they are the recall gap reported on agents-mjhp6 and belong to
+        whoever narrows the rule, because a red pin is not landable.
+        """
+        for description in ("Promise.all would help.",
+                            "Switching to Promise.all would reduce latency."):
+            with self.subTest(description=description):
+                self.assertTrue(
+                    is_concurrency_recommendation(
+                        {"rule_id": "perf-review", "description": description, "remediation": ""}),
+                    "advice phrased with 'would' must stay a recommendation: a change-noun-subject "
+                    "discriminator is the fix for the outcome-report row, not the modal itself",
+                )
+
     def test_a_description_in_the_title_or_description_is_not_a_recommendation(self):
         """agents-ttcyx: the fallback re-read the sentence, so a description-only finding was advice.
 
