@@ -406,14 +406,27 @@ _CONCURRENCY_ADVICE_ROLE_PATTERN = re.compile(
     # second-person "You may want to use ..." keeps its may through the branch below.
     r"|(?:^|[;:,.!?]\s*)\s*"
     r"(?:let'?s\s+|"
-    r"you\s+(?:can|could|may|might|should|must)\s+(?:want\s+to\s+)?|"
-    r"we\s+(?:can|could|should|must|recommend|suggest|ought\s+to|need\s+to)\s+)?"
+    r"you\s+(?:can|could|would|may|might|should|must)\s+(?:want\s+to\s+)?|"
+    r"we\s+(?:can|could|would|should|must|recommend|suggest|ought\s+to|need\s+to)\s+|"
+    r"i\s+(?:can|could|would|should|must|may|might)\s+)?"
     r"(?:use(?!\s+of\b)|call(?!\s+to\b)|dispatch(?!\s+of\b)|prefer|consider|switch(?:ing)?\s+to|start|run|execute|"
     r"await|issue|send|batch|parallelize|adopt|apply|add|make)\b"
     r"[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
     # (a2) advisory modal / recommend verb governing the shape inside one clause
     r"|\b(?:should|must|ought\s+to|need\s+to|recommend\w*|suggest\w*|consider|better\s+to|"
     r"good\s+(?:idea|way)\s+to|worth\s+considering)\b[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
+    # (a4) "WOULD + a cue verb" ANYWHERE in the clause, whoever the subject is. impl-cygm4 measured six
+    #      sentences that are genuine soft ADVICE and were False on main 23b64372 while "We could use ..."
+    #      was True in the identical frame: "We would use Promise.all", "We would use asyncio.gather
+    #      here", "You would use ...", "I would use ...", "We would switch to ...", "The team would use
+    #      ...". 'would' appeared in no opener, so the cue was never clause-initial under any shape.
+    #      Missing advice is the DANGEROUS direction for this guard - an unguarded recommendation ships -
+    #      so the modal is now accepted with a cue verb after ANY subject, and a sentence that merely
+    #      predicts ("The code would use X if the flag is set") is withheld too, which is the fail-safe
+    #      side of the same ambiguity. Note this cannot re-open agents-c9w4t: that case has no cue verb
+    #      after 'would' ("the change to Promise.all would reduce memory"), so it is still governed by a3.
+    r"|\bwould\s+(?:also\s+)?(?:use|prefer|call|switch\s+to|run|execute|adopt|apply|batch|parallelize|"
+    r"introduce|add|start|issue|send|dispatch|await)\b[^.;\n]{0,60}?" + _CONCURRENCY_SHAPE +
     # (a3) the shape as SUBJECT of an advisory predicate - "Promise.all would help", "worker pools
     #      would cut latency". agents-9fcl5 measured this flipping True->False: the modal is after
     #      the shape here, so neither a1 nor a2 can see it. The predicate list is deliberately about
@@ -438,6 +451,20 @@ _FINITE_PREDICATE_AFTER_MATCH_PATTERN = re.compile(r"\b(?:are|is|was|were|has|ha
 _EVIDENCE_REPORT_MARKER_PATTERN = re.compile(
     r"\b(?:as\s+measured|measured|benchmarks?|according\s+to|profil(?:er|ed|ing)|per\s+the\s+benchmark)\b",
     re.IGNORECASE
+)
+
+
+# agents-c9w4t: an a3 match (shape + modal + benefit) reports an OUTCOME when the shape is the OBJECT of
+# a change, not its subject - "The change to Promise.all would reduce memory usage". The change noun is
+# what separates that from advice ("Promise.all would help") and from "Switching to Promise.all would
+# reduce latency", which impl-cygm4 pins as adherence advice, so the gerund "switching" is deliberately
+# NOT in this list while the noun forms are.
+_CHANGE_OBJECT_SUBJECT_PATTERN = re.compile(
+    r"(?:\bthe\s+)?\b(?:change|changes|migration|move|upgrade)\s+(?:to|towards)\s*$",
+    re.IGNORECASE
+)
+_A3_MATCH_PATTERN = re.compile(
+    r"^\s*" + _CONCURRENCY_SHAPE + r"\s+(?:would|could|should)\s+", re.IGNORECASE
 )
 
 
@@ -469,6 +496,13 @@ def _has_concurrency_advice_role(text: str) -> bool:
         anchored_by_comma = match.group(0).lstrip()[:1] in (",", ":")
         if anchored_by_comma and _FINITE_PREDICATE_AFTER_MATCH_PATTERN.search(clause_tail):
             continue
+        # agents-c9w4t: an a3 match whose shape is the OBJECT of a change noun is an outcome report.
+        # Only a3 can be fooled this way, because only a3 matches starting AT the shape - an a1/a4 match
+        # carries its subject and cue, so the change noun cannot be mistaken for the shape's own clause.
+        if _A3_MATCH_PATTERN.match(match.group(0)):
+            lookback = text[max(0, match.start() - 50):match.start()]
+            if _CHANGE_OBJECT_SUBJECT_PATTERN.search(lookback):
+                continue
         return True
     return False
 

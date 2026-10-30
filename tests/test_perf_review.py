@@ -1202,6 +1202,15 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         ("perf-review",
          "At startup, run worker pools are created eagerly.",
          "Consider the fan-out."),
+        # agents-c9w4t: an a3 match whose shape is the OBJECT of a change noun reports an outcome, not
+        # advice. The discriminator is the change noun and NOT the modal - "Promise.all would help" and
+        # "Switching to Promise.all would reduce latency" are advice and must stay True (pinned above).
+        ("perf-review",
+         "The change to Promise.all would reduce memory usage in the batch stage.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "The migration to asyncio.gather would cut the p99 latency of the loader.",
+         "Consider the fan-out."),
     )
 
     # agents-3lr9o's third row is DELIBERATELY still classified as advice, and pinned that way so a
@@ -1246,6 +1255,18 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         # finite predicate after the shape, so neither may be reclassified as a description.
         "To reduce latency, use Promise.all; the calls are independent.",
         "We could run these in parallel; the calls are independent.",
+        # impl-cygm4 measured 'would' swallowing soft advice on main 23b64372: 'would' was in no opener,
+        # so the cue was never clause-initial under any shape, and all six cases below were False in the
+        # description field while "We could use ..." was True in the identical frame. Missing advice ships
+        # an unguarded recommendation, so this is the dangerous direction and it is pinned here.
+        "We would use Promise.all for these fetches.",
+        "We would use asyncio.gather here.",
+        "You would use Promise.all for these fetches.",
+        "I would use Promise.all here.",
+        "We would switch to Promise.all for the fan-out.",
+        # And the two rows impl-cygm4 pinned from their side, so a narrower a3 cannot lose them:
+        "Promise.all would help.",
+        "Switching to Promise.all would reduce latency.",
     )
 
     def test_a_descriptive_mention_is_not_a_recommendation(self):
