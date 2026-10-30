@@ -1176,6 +1176,56 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         ("perf-review",
          "Do not use Promise.all here, the fan-out saturates the socket pool.",
          "Bound the concurrency."),
+        # agents-mjhp6 (round-2 reviewer): an OUTCOME report about a landed change, and epistemic or
+        # speculative prose. All four were True on origin/main too - residuals, not regressions - and
+        # all four are now False: `will` is out of a3's modal set (an outcome, not advice), the
+        # first-person opener no longer takes may/might (possibility, not advice), and the a0 openers
+        # no longer include maybe/perhaps (speculation).
+        ("perf-review",
+         "The change to Promise.all will reduce memory usage in the batch stage.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "Switching the loader to asyncio.gather should cut p99 latency, as measured in the benchmark.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "We may use Promise.all in some code paths depending on the runtime.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "Perhaps asyncio.gather is faster for this workload.",
+         "Consider the fan-out."),
+        # agents-3lr9o (round-1 reviewer): a cue after a comma opening a NOUN-PHRASE SUBJECT rather than
+        # an imperative. The finite predicate in the same clause is what tells them apart, and the
+        # check is confined to comma/colon anchors so the infinitival advice shape keeps working.
+        ("perf-review",
+         "In the batch stage, dispatch requests via Promise.all are logged and capped.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "At startup, run worker pools are created eagerly.",
+         "Consider the fan-out."),
+        # agents-c9w4t: an a3 match whose shape is the OBJECT of a change noun reports an outcome, not
+        # advice. The discriminator is the change noun and NOT the modal - "Promise.all would help" and
+        # "Switching to Promise.all would reduce latency" are advice and must stay True (pinned above).
+        ("perf-review",
+         "The change to Promise.all would reduce memory usage in the batch stage.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "The migration to asyncio.gather would cut the p99 latency of the loader.",
+         "Consider the fan-out."),
+        # agents-4rk3x (round-3 reviewer, P3): the benchmark marker can PRECEDE the match in the same
+        # clause, so the evidence check has to look back to the clause start, not only forward.
+        ("perf-review",
+         "As measured in the benchmark, switching the loader to asyncio.gather should cut p99 latency.",
+         "Consider the fan-out."),
+    )
+
+    # agents-3lr9o's third row is DELIBERATELY still classified as advice, and pinned that way so a
+    # later round has to argue with a test rather than quietly flip it. "On the ingest path, add items
+    # to the thread pool from a single producer." has no finite predicate after the shape, so the
+    # subject test cannot see it - and read on its own it is an imperative about a concurrency
+    # primitive. For a guard whose job is not letting an unguarded recommendation through, withholding
+    # an ambiguous sentence is the direction that fails safe; the cost is one withheld clean report.
+    AMBIGUOUS_BUT_GUARDED = (
+        "On the ingest path, add items to the thread pool from a single producer.",
     )
 
     # The recall side. None of these may be lost to the precision fix above.
@@ -1206,6 +1256,29 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         "Use Promise.all so background jobs don't starve the worker pool.",
         "Run asyncio.gather to flood the cache warmer up front.",
         "Use Promise.all here; otherwise requests exhaust the timeout budget.",
+        # The comma anchor and the infinitive must survive the agents-3lr9o subject test: neither has a
+        # finite predicate after the shape, so neither may be reclassified as a description.
+        "To reduce latency, use Promise.all; the calls are independent.",
+        "We could run these in parallel; the calls are independent.",
+        # agents-rk2y7 (round-3 reviewer, P2): a SUBORDINATE clause carries its own subject and verb, so
+        # a finite predicate after "when/where/if" is not evidence against the imperative. These were
+        # flipped True->False by the agents-3lr9o subject test - the direction where an unguarded
+        # recommendation ships - and must stay True.
+        "To reduce latency, use Promise.all when tasks are independent.",
+        "For the loader, use Promise.all where items are processed independently.",
+        "To reduce latency, use Promise.all if the calls are independent.",
+        # impl-cygm4 measured 'would' swallowing soft advice on main 23b64372: 'would' was in no opener,
+        # so the cue was never clause-initial under any shape, and all six cases below were False in the
+        # description field while "We could use ..." was True in the identical frame. Missing advice ships
+        # an unguarded recommendation, so this is the dangerous direction and it is pinned here.
+        "We would use Promise.all for these fetches.",
+        "We would use asyncio.gather here.",
+        "You would use Promise.all for these fetches.",
+        "I would use Promise.all here.",
+        "We would switch to Promise.all for the fan-out.",
+        # And the two rows impl-cygm4 pinned from their side, so a narrower a3 cannot lose them:
+        "Promise.all would help.",
+        "Switching to Promise.all would reduce latency.",
     )
 
     def test_a_descriptive_mention_is_not_a_recommendation(self):
@@ -1245,6 +1318,19 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
                     len(unpreconditioned_concurrency_findings({"findings": [dict(finding)]})), 1,
                     "genuine advice in prose must still carry its reentrancy precondition"
                 )
+
+    def test_an_ambiguous_imperative_shape_stays_guarded(self):
+        """agents-3lr9o row 3: no finite predicate after the shape, so the subject test cannot see it.
+
+        Read on its own the sentence is an imperative about a concurrency primitive, and for this guard
+        the safe direction is to withhold it. Pinned True so that changing it requires a decision here
+        instead of a silent edit to a role list.
+        """
+        for description in self.AMBIGUOUS_BUT_GUARDED:
+            with self.subTest(description=description):
+                self.assertTrue(is_concurrency_recommendation(
+                    {"rule_id": "perf-review", "description": description}
+                ))
 
     def test_a_harm_verb_sentence_is_not_read_as_advice(self):
         """agents-ekrw4 root cause 2: the hazard exemption lacked the verbs these sentences use."""
