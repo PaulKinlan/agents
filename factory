@@ -207,6 +207,13 @@ class SilentStationError(NoVerdictError):
     degrades to ERROR, allowing the line to continue as INCOMPLETE rather than halting every
     downstream station. Subclasses NoVerdictError so line continuation and retry mechanisms
     catch it cleanly.
+
+    The same classification covers a FIRST-attempt engine call killed by the station budget
+    with no output produced (agents-1ansb): a budget-expiry with a 0-byte model_output.txt is
+    the engine never answering — the transient shape — not a judgement to reject. Single-call
+    stations only; a batched station's hung batch stays with its own fair-share mechanism. A
+    timeout on the retry attempt, or one that left output behind, stays the terminal
+    StationTimeout.
     """
 
 
@@ -2587,6 +2594,42 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                         json.dumps(batch_retries, indent=2))
             except StationTimeout as e:
                 reason = str(e)
+                # agents-1ansb: a FIRST-attempt engine call killed by the station budget having
+                # produced NOTHING is the transient silent shape under the agents-h8i4 evidence
+                # rule: no output means the engine never answered, so there is no judgement to
+                # reject - one hung or slow model call must not cost the station its verdict
+                # (measured nightly 2026-10-27: qa-station killed at its 204.7s allowance with a
+                # 0-byte model_output.txt, after 17 nights of 36-101s engine durations on the
+                # same prompt). Classify it as a silent station so
+                # run_station_with_repair_retry retries ONCE with a fresh attempt directory and
+                # a fresh budget (agents-30q, agents-h8i4 mechanics).
+                # SINGLE-CALL stations only: a BATCHED station's hung batch is the subject of
+                # the purpose-built fair-share mechanism (agents-xm2xc) - "one hung batch
+                # cannot spend the whole funded deadline" - and a whole-station redo would
+                # discard the answers earlier batches already produced. A retry attempt
+                # (attempt > 1), and a timeout that DID leave output, stay the terminal
+                # StationTimeout they always were: a station that hangs twice is the run's
+                # answer, reported TIMEOUT.
+                produced_output = run_dir / "model_output.txt"
+                engine_silent = (not produced_output.exists()) or produced_output.stat().st_size == 0
+                # A deadline can expire in call_timeout BEFORE the engine is invoked.
+                # In that case there is no timed-out engine call to retry; the call
+                # evidence is appended only by run_station_command's timeout path.
+                engine_timed_out = bool(engine_calls and engine_calls[-1].get("outcome") == "timeout")
+                if attempt == 1 and not batched and engine_silent and engine_timed_out:
+                    silent_reason = (f"{agent_name}: engine '{engine}' produced no verdict and no "
+                                     f"output (station budget expired: {reason}; silent station)")
+                    report = {
+                        "summary": f"NO VERDICT: {silent_reason}",
+                        "verdict": "error",
+                        "status": "ERROR",
+                        "error": silent_reason,
+                        "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                        "findings": []
+                    }
+                    _write_run_artifact(run_dir / "report.json", json.dumps(report, indent=2))
+                    _write_run_artifact(run_dir / "failure_reason.txt", silent_reason + "\n")
+                    raise SilentStationError(silent_reason) from e
                 report = {
                     "summary": f"STATION TIMED OUT: {reason}",
                     "verdict": "timeout",
@@ -3216,7 +3259,9 @@ def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str
     A GENUINE failure — a StationError that is not a NoVerdictError (a failed pre-pass or engine
     with error output) or a SystemExit (fail-closed) — propagates immediately and is never retried:
     the station could not run, so the line must halt.
-    A silent station (no verdict and no output) is retried ONCE (agents-h8i4).
+    A silent station (no verdict and no output) is retried ONCE (agents-h8i4) — including a
+    single-call station whose first engine call the station budget killed with nothing
+    produced (agents-1ansb: one hung model call must not cost the station its verdict).
     A no-verdict (the engine ran and returned zero but its output was unparseable or schema-invalid)
     is retried ONCE with a hint telling the model what was rejected; if the retry also produces no
     verdict, the NoVerdictError propagates so run_line degrades the station to ERROR and continues
