@@ -1164,6 +1164,18 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         ("perf-review",
          "The handler can call Promise.all on the batch.",
          "Consider the fan-out."),
+        # agents-9fcl5 / agents-5rnta: shapes that must stay DESCRIPTIVE while the advice roles grow.
+        # A gerund SUBJECT is a description ("Using X exhausts the pool"), so "using" is not accepted as
+        # a cue on its own; an avoidance cue is not clause-initial, and no advisory modal governs it.
+        ("perf-review",
+         "Using Promise.all on unbounded input exhausts the pool.",
+         "Bound the concurrency."),
+        ("perf-review",
+         "Never use Promise.all; it exhausts the connection pool.",
+         "Bound the concurrency."),
+        ("perf-review",
+         "Do not use Promise.all here, the fan-out saturates the socket pool.",
+         "Bound the concurrency."),
     )
 
     # The recall side. None of these may be lost to the precision fix above.
@@ -1180,6 +1192,20 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
         # advisory modal governing the shape mid-clause
         "These calls should run in parallel.",
         "We recommend Promise.all here.",
+        # agents-9fcl5: measured True at merge-base 9655e59d, flipped False by the first cut of this
+        # fix, and the reason the LAND-SUMMARY's "every phrasing that worked before" had to be
+        # withdrawn rather than argued with. They stay here so the next widening cannot lose them.
+        "Try using Promise.all for these fetches.",
+        "We could use Promise.all to fetch the user URLs.",
+        "Let's parallelize these calls with asyncio.gather.",
+        "How about using asyncio.gather for the fan-out?",
+        "Switching to Promise.all would reduce latency.",
+        "Promise.all would help.",
+        # agents-5rnta: imperative advice that names its HAZARD as the reason. True at merge-base,
+        # False when the hazard veto was evaluated first - the ordering the reviewer caught.
+        "Use Promise.all so background jobs don't starve the worker pool.",
+        "Run asyncio.gather to flood the cache warmer up front.",
+        "Use Promise.all here; otherwise requests exhaust the timeout budget.",
     )
 
     def test_a_descriptive_mention_is_not_a_recommendation(self):

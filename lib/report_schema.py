@@ -385,19 +385,36 @@ _CONCURRENCY_SHAPE = (
     r"simultane\w*|overlap\w*|worker\s+pool\w*|thread\s+pool\w*|web\s+workers?|p-?limit)"
 )
 _CONCURRENCY_ADVICE_ROLE_PATTERN = re.compile(
+    # (a0) an explicit advisory opener that leads STRAIGHT into the shape, with no cue verb of its own -
+    #      "Try using Promise.all ...", "How about using asyncio.gather ...". agents-9fcl5 measured
+    #      these flipping True->False: the opener supplies the advice and "using" is not a cue we can
+    #      afford to accept everywhere, because a gerund subject ("Using Promise.all on unbounded input
+    #      exhausts the pool") is a DESCRIPTION. So the advice comes from the opener, not the gerund.
+    r"(?:^|[;:,.!?]\s*)\s*"
+    r"(?:try|how\s+about|what\s+about|maybe|perhaps|consider)\s+"
+    r"(?:using\s+|to\s+use\s+|adopting\s+|switching\s+to\s+)?" + _CONCURRENCY_SHAPE +
     # (a1) clause-initial imperative, optionally behind an ADVISORY opener. A bare subject is not an
     # advisory opener: "We use Promise.all to fetch user URLs" describes, "We should use it" advises,
     # and "You use X" is present tense while "You can use X" is advice - so the modal is mandatory
     # when a subject is present, which is what keeps the first-person descriptive case out.
-    r"(?:^|[;:,.!?]\s*)\s*"
-    r"(?:(?:you\s+(?:can|could|may|might|should|must)\s+(?:want\s+to\s+)?)|"
-    r"(?:we\s+(?:should|must|recommend|suggest|ought\s+to|need\s+to)\s+))?"
-    r"(?:use(?!\s+of\b)|call(?!\s+to\b)|dispatch(?!\s+of\b)|prefer|consider|switch\s+to|start|run|execute|"
+    # The openers are measured, not guessed: agents-9fcl5 found "We could use ..." and
+    # "Let's parallelize ..." flipping to False against the merge-base.
+    r"|(?:^|[;:,.!?]\s*)\s*"
+    r"(?:let'?s\s+|"
+    r"you\s+(?:can|could|may|might|should|must)\s+(?:want\s+to\s+)?|"
+    r"we\s+(?:can|could|may|might|should|must|recommend|suggest|ought\s+to|need\s+to)\s+)?"
+    r"(?:use(?!\s+of\b)|call(?!\s+to\b)|dispatch(?!\s+of\b)|prefer|consider|switch(?:ing)?\s+to|start|run|execute|"
     r"await|issue|send|batch|parallelize|adopt|apply|add|make)\b"
     r"[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
     # (a2) advisory modal / recommend verb governing the shape inside one clause
     r"|\b(?:should|must|ought\s+to|need\s+to|recommend\w*|suggest\w*|consider|better\s+to|"
-    r"good\s+(?:idea|way)\s+to|worth\s+considering)\b[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE,
+    r"good\s+(?:idea|way)\s+to|worth\s+considering)\b[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
+    # (a3) the shape as SUBJECT of an advisory predicate - "Promise.all would help", "worker pools
+    #      would cut latency". agents-9fcl5 measured this flipping True->False: the modal is after
+    #      the shape here, so neither a1 nor a2 can see it. The predicate list is deliberately about
+    #      benefit, not about what the code does, so "Promise.all exhausts the pool" stays descriptive.
+    r"|" + _CONCURRENCY_SHAPE + r"\s+(?:would|could|will|should)\s+"
+    r"(?:help|reduce|speed|improve|cut|avoid|make\s+(?:it|them|this|these)|be\s+(?:better|faster|quicker|simpler))\b",
     re.IGNORECASE
 )
 
