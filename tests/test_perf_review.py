@@ -31,6 +31,7 @@ from tests.test_factory_truth import Sandbox, factory_cli, report  # noqa: E402
 
 from lib.findings import FindingsStore  # noqa: E402
 from lib.report_schema import (  # noqa: E402
+    _paraphrase_clause_start_connectors,
     guard_concurrency_finding,
     has_reentrancy_precondition,
     is_concurrency_recommendation,
@@ -1167,6 +1168,73 @@ class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
         self.assertIn("otherwise preserve serial execution", remediation)
         self.assertTrue(any("withheld" in note and "fallback-only advice" in note for note in notes), notes)
         self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+
+class TestCodeIsNeverParaphrased(unittest.TestCase):
+    """agents-obqph / agents-hgiui: the guard may restate PROSE connectors, never code.
+
+    The paraphrase exists so a local "otherwise" cannot be misread as the fallback of the IF the guard
+    adds. A snippet's own `else` is not that word at all - rewriting it publishes a remediation a
+    human is meant to paste as invalid code, which is what both findings measured ("if (a) run(); if
+    not, await run();"). The reader that decides is shared with the validator, so the guard cannot
+    paraphrase one form while treating the other as prose: fenced blocks, inline spans, a connector
+    that opens a call-shaped clause, and a text-final connector all pass through untouched.
+    """
+
+    def finding(self, remediation):
+        return {"rule_id": "tm-pdf-parse-uncancellable", "path": "src/parse.ts",
+                "line_number": 42, "remediation": remediation}
+
+    def test_a_fenced_snippet_that_ends_in_else_keeps_the_keyword(self):
+        # hgiui's exact input: the fence's last line ends with the language's own else.
+        snippet = "Make the parse cancellable.\n```js\nif (a) run(); else\n```"
+        self.assertEqual(_paraphrase_clause_start_connectors(snippet), snippet,
+                         "a fenced snippet must pass through byte for byte")
+
+    def test_an_inline_code_span_is_copied_through(self):
+        text = "Loop the calls; `if (a) run(); else await run();` then bound them"
+        self.assertEqual(_paraphrase_clause_start_connectors(text), text)
+
+    def test_an_unmarked_code_clause_keeps_the_language_keyword(self):
+        # obqph's input: no backticks, so the call-shaped clause is the only signal there is.
+        text = ("Make the parse cancellable. In the async loop if (a) run(); else await run(); "
+                "prefer a worker pool with per-parse abort.")
+        out = _paraphrase_clause_start_connectors(text)
+        self.assertIn("else await run();", out, "the JS keyword is not an English connector")
+        self.assertNotIn("if not, await run();", out)
+
+    def test_a_text_final_connector_is_dropped_instead_of_paraphrased(self):
+        # obqph symptom 2: a connector with no clause became "if not," and the wrapper's own
+        # "; otherwise ..." then doubled it into "if not; otherwise".
+        report = {"findings": [self.finding("Use Promise.all; else")]}
+        normalize_report(report)
+        remediation = report["findings"][0]["remediation"]
+        self.assertNotIn("if not", remediation)
+        self.assertEqual(remediation.count("otherwise"), 1, remediation)
+        self.assertTrue(remediation.endswith("otherwise preserve serial execution."), remediation)
+
+    def test_prose_connectors_are_still_paraphrased(self):
+        text = "Make the parse cancellable; otherwise queue starvation blocks the pipeline"
+        self.assertEqual(_paraphrase_clause_start_connectors(text),
+                         "Make the parse cancellable; if not, queue starvation blocks the pipeline")
+        # A connector that carries its own comma is not paraphrased into a doubled separator.
+        self.assertEqual(_paraphrase_clause_start_connectors("Otherwise, run them serially."),
+                         "If not, run them serially.")
+
+    def test_a_fenced_else_is_not_read_as_the_guards_fallback_boundary(self):
+        """The validator must see the same prose the rewrite does, or the guard loses its own text."""
+        report = {"findings": [self.finding(
+            "IF backend is reentrant, use a worker pool.\n```js\nif (a) run(); else\n```")]}
+        notes = normalize_report(report)
+        remediation = report["findings"][0]["remediation"]
+        self.assertIn("if (a) run(); else", remediation,
+                      "a fallback boundary inside a fence must not cut the snippet in half")
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertFalse(any("withheld" in note for note in notes), notes)
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [],
+                         "the rewrite must be a report its own validator accepts")
+        self.assertEqual(normalize_report(report), [], "a second pass must find nothing to do")
+        self.assertEqual(report["findings"][0]["remediation"], remediation)
 
 
 class TestTheOutputContractAsksForWhatTheSchemaRequires(unittest.TestCase):
