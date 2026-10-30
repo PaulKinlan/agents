@@ -1296,6 +1296,201 @@ class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
                 ))
 
 
+class TestDescriptiveProseKeepsItsGuard(unittest.TestCase):
+    """agents-wjqez: reporting what the code does is not advice, and must not invalidate the report.
+
+    The guard used to fire on any mention of a primitive, so a hazard finding whose remediation READ
+    "The use of Promise.all on unbounded input exhausts the socket pool" was classified as a
+    recommendation - guarded, then rejected by validate_agent_report, so the whole report failed and
+    the station read INCOMPLETE. The cue is grammatical position before the primitive in its own
+    clause: a nominaliser or a subject that performs the verb describes; an imperative, a modal or a
+    recommendation verb advises. The advice forms that agents-shwzh measured are pinned here too, so
+    narrowing one side cannot silently cost the other.
+    """
+
+    DESCRIPTIVE = (
+        "Use of Promise.all on unbounded input exhausts the socket pool.",
+        "The use of asyncio.gather here creates an unbounded task set from untrusted input.",
+        "A call to Promise.all with attacker-controlled length causes memory exhaustion.",
+        "We use Promise.all to fetch user-supplied URLs, allowing SSRF fan-out.",
+        "The use of Promise.allSettled without inspecting results silently drops rejections.",
+        "The dispatch of requests via Promise.all has no concurrency cap.",
+    )
+
+    # agents-ttcyx: the same defect reached through the title/description fallback, where the subject
+    # and its verb are separated by a modal ("the SDK will use", "the code can call") or the subject
+    # is a third party describing the attack ("an attacker can use Promise.all to amplify requests").
+    DESCRIPTIVE_IN_PROSE = (
+        "An attacker can use Promise.all to amplify requests and exhaust the connection pool.",
+        "The SDK will use Promise.all internally for every request.",
+        "The code can call Promise.all with an unbounded array.",
+        "The handler uses Promise.all without a cap.",
+        "A client can call Promise.all with an unbounded array.",
+    )
+
+    STILL_ADVICE = (
+        "Use Promise.all for these fetches.",
+        "Switch this loop to asyncio.gather.",
+        "We recommend using Promise.all for the fan-out.",
+        "You can use Promise.all for these fetches.",
+        "These inference calls should be awaited with Promise.all.",
+        "It is better to use Promise.all for the independent fetches.",
+        "Please use Promise.all for these calls.",
+    )
+
+    def finding(self, remediation, **extra):
+        found = {"rule_id": "unsafe-concurrency", "path": "src/model.ts", "line_number": 20,
+                 "description": "Multiple inference calls are issued from one handler.",
+                 "remediation": remediation}
+        found.update(extra)
+        return found
+
+    def test_a_descriptive_remediation_is_guarded_rather_than_dropped(self):
+        """The remediation field is the advice field, so the role design guards it either way.
+
+        The earlier pin here asserted that a descriptive sentence in `remediation` was not a
+        recommendation at all - that was agents-wjqez's mention-based rule. The advice-role design
+        that landed as agents-ekrw4 treats the field as an offer of a fix and guards it, which adds
+        a precondition to a sentence that does not advise concurrency: noise, not a hole. What must
+        never happen is the reverse - concurrency text left unguarded - and that is what this pins.
+        """
+        for remediation in self.DESCRIPTIVE:
+            with self.subTest(remediation=remediation):
+                report = {"findings": [self.finding(remediation)]}
+                normalize_report(report)
+                self.assertEqual(
+                    unpreconditioned_concurrency_findings(report), [],
+                    "concurrency text in the remediation must never be left unguarded")
+        # A fresh, un-normalized report is of course still flagged for guarding - that is the
+        # role design saying "this text names concurrency". The pin is that normalizing it leaves
+        # nothing unguarded, which is what the loop above asserts.
+
+    def test_genuine_advice_keeps_its_precondition(self):
+        for remediation in self.STILL_ADVICE:
+            with self.subTest(remediation=remediation):
+                self.assertTrue(is_concurrency_recommendation(self.finding(remediation)),
+                                "narrowing the description side must not cost the advice side")
+
+    def test_a_description_in_the_title_or_description_is_not_a_recommendation(self):
+        """agents-ttcyx: the fallback re-read the sentence, so a description-only finding was advice.
+
+        Here the remedy is empty and the concurrency sentence IS the title/description, which is the
+        shape a hazard station actually emits - "The SDK will use Promise.all internally for every
+        request" was classified as a recommendation and rejected the whole report.
+        """
+        for prose in self.DESCRIPTIVE_IN_PROSE:
+            with self.subTest(prose=prose):
+                self.assertFalse(is_concurrency_recommendation(
+                    {"rule_id": "custom-rule", "description": prose, "remediation": ""}))
+
+    def test_a_description_with_no_remedy_still_counts_when_it_advises(self):
+        for prose in ("Use Promise.all for every request in this handler.",
+                      "You should switch this loop to asyncio.gather."):
+            with self.subTest(prose=prose):
+                self.assertTrue(is_concurrency_recommendation(
+                    {"rule_id": "custom-rule", "description": prose, "remediation": ""}))
+
+    def test_a_description_with_an_unrelated_remediation_is_still_a_description(self):
+        """agents-1f71g: the description carried the primitive, the remedy did not.
+
+        The first cut checked only the REMEDIATION for descriptive phrasing, so a hazard finding
+        whose remedy is unrelated advice - "Bound the concurrency with a semaphore." - fell through
+        to the title/description fallback and was rejected again. The fallback text is classified by
+        the same clause-position test now, so this shape is a description whatever the remedy says.
+        """
+        for prose in self.DESCRIPTIVE:
+            with self.subTest(prose=prose):
+                found = {"rule_id": "unsafe-concurrency", "path": "src/a.ts", "line_number": 3,
+                         "description": prose,
+                         "remediation": "Bound the concurrency with a semaphore."}
+                self.assertFalse(is_concurrency_recommendation(found))
+                self.assertEqual(unpreconditioned_concurrency_findings({"findings": [dict(found)]}), [],
+                                 "a description must not be reported as an unguarded recommendation")
+
+    def test_a_remediation_that_offers_or_prescribes_is_advice_not_a_description(self):
+        """agents-1ne8e, the DANGEROUS direction: a modal in a REMEDIATION is an offer of a fix.
+
+        Reading "The handler can use Promise.all to fetch independent resources" as a description
+        shipped the advice with no reentrancy precondition at all. Ability/prediction modals are
+        therefore allowed only in a description; in a remediation any modal means advice, and the
+        normative ones are excluded from the filler between subject and verb so they cannot be
+        swallowed and read back as description.
+        """
+        for remediation in (
+            "The handler should use Promise.all to fetch independent resources.",
+            "We should use Promise.all for this fan-out.",
+            "The code must use asyncio.gather here.",
+            "This service ought to use Promise.all.",
+            "The worker needs to call asyncio.gather.",
+            "The handler can use Promise.all to fetch independent resources.",
+            "We can use Promise.all to fetch these.",
+            "The SDK will use Promise.all to speed this up.",
+        ):
+            with self.subTest(remediation=remediation):
+                self.assertTrue(is_concurrency_recommendation(
+                    {"rule_id": "perf-review", "description": "Waterfall.",
+                     "remediation": remediation}))
+
+    def test_descriptive_subjects_cover_the_software_inventory(self):
+        """agents-1ne8e, the precision direction: five nouns was a list, not an inventory.
+
+        "The function uses Promise.all" fell outside it and rejected the report.
+        """
+        for noun in ("function", "method", "worker", "pipeline", "loop", "script",
+                     "middleware", "route", "endpoint", "module", "adapter", "scheduler"):
+            with self.subTest(noun=noun):
+                prose = f"The {noun} uses Promise.all without bounded concurrency."
+                found = {"rule_id": "unsafe-concurrency", "path": "src/a.ts", "line_number": 3,
+                         "description": prose,
+                         "remediation": "Bound the concurrency with a semaphore."}
+                self.assertFalse(is_concurrency_recommendation(found))
+                self.assertEqual(unpreconditioned_concurrency_findings({"findings": [dict(found)]}), [])
+
+    def test_a_title_without_punctuation_does_not_run_into_the_description(self):
+        """agents-43cso: title and description are joined at a SENTENCE BOUNDARY, not by a space.
+
+        Joined with a space, "Unbounded inference fan-in" ran straight into the description, so the
+        clause the pattern reads was "... fan-in An attacker can use " and the descriptive subject
+        was never at a clause start.
+        """
+        found = {"rule_id": "unsafe-concurrency", "title": "Unbounded inference fan-in",
+                 "description": "An attacker can use Promise.all to amplify requests and exhaust the "
+                                "connection pool.",
+                 "remediation": "Bound the concurrency with a semaphore."}
+        self.assertFalse(is_concurrency_recommendation(found))
+        self.assertEqual(unpreconditioned_concurrency_findings({"findings": [dict(found)]}), [])
+
+    def test_a_leading_prepositional_phrase_does_not_hide_the_subject(self):
+        """agents-43cso: "In the login endpoint, the handler uses ..." is the same description."""
+        found = {"rule_id": "unsafe-concurrency",
+                 "description": "In the login endpoint, the handler uses Promise.all without a cap.",
+                 "remediation": "Bound the concurrency with a semaphore."}
+        self.assertFalse(is_concurrency_recommendation(found))
+        self.assertEqual(unpreconditioned_concurrency_findings({"findings": [dict(found)]}), [])
+        # ... and the same shape with a normative modal is still advice.
+        self.assertTrue(is_concurrency_recommendation(
+            {"rule_id": "perf-review", "description": "Waterfall.",
+             "remediation": "In the login endpoint, the handler should use Promise.all for the fan-out."}))
+
+    def test_one_advice_clause_in_the_same_remediation_still_counts(self):
+        # Only the ALL-descriptive case is a description: a remediation that describes today and
+        # then recommends is advice, and the guard must still act on it.
+        mixed = "We use Promise.all today; switch the loop to asyncio.gather instead."
+        self.assertTrue(is_concurrency_recommendation(self.finding(mixed)))
+
+    def test_a_descriptive_remediation_shipping_a_concurrency_patch_is_still_guarded(self):
+        # Step 1 (an added diff line that introduces concurrency) is advice whatever the prose says,
+        # and the patch is still withheld.
+        found = self.finding(
+            "The use of Promise.all here exhausts the socket pool.",
+            proposed_fix_diff=("--- a/x.ts\n+++ b/x.ts\n@@\n-for (const u of urls) await get(u)\n"
+                               "+await Promise.all(urls.map(get))\n"))
+        self.assertTrue(is_concurrency_recommendation(found))
+        self.assertIsNotNone(guard_concurrency_finding(found, 0))
+        self.assertNotIn("proposed_fix_diff", found, "an automated patch must never survive the guard")
+
+
+
 class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
     """agents-gjm4n / agents-3t9oz: "otherwise" states a CONSEQUENCE at least as often as a fallback.
 
