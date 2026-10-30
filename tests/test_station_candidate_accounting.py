@@ -449,18 +449,23 @@ class TestIdentityIsVisibleWhereverTheCountIsShown(unittest.TestCase):
 class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
     def test_every_station_declares_candidate_id_so_the_prompt_carries_it(self):
         """Same mechanism as the dismissal flag: the schema is embedded in the prompt, so a field it does not
-        declare reaches the model only as prose."""
+        declare reaches the model only as prose.
+
+        AND IT MUST STAY OPTIONAL IN EVERY STATION, docs-drift included (agents-0ydyn). docs-drift required it
+        from agents-fmakh until the location repair existed; once agents-op02b added that repair, the
+        requirement became the thing that disabled it: validate_agent_report runs inside parse_station_report
+        (factory:~1043), while repair_report_candidate_ids runs on what parse_station_report RETURNS
+        (factory:~2727), so a required id rejected the report for the omission that the next step exists to fix.
+        A test that pins `required` here is pinning that ordering bug back in.
+        """
         for station in CANDIDATE_ID_STATIONS:
             with self.subTest(station=station):
                 items = json.loads((REPO / "agents" / station / "report.schema.json").read_text())[
                     "properties"]["findings"]["items"]
                 self.assertEqual(items["properties"]["candidate_id"]["type"], "string")
-                if station == "docs-drift":
-                    # check_docs.py always stamps ids; optional rows yielded 0/5 citations (agents-fmakh).
-                    self.assertIn("candidate_id", items.get("required", []))
-                else:
-                    self.assertNotIn("candidate_id", items.get("required", []),
-                                     "pre-scheme reports and stations without a pre-pass do not carry it")
+                self.assertNotIn("candidate_id", items.get("required", []),
+                                 "a required id is rejected before the location repair can fill it in")
+
 
     def test_every_station_contract_asks_for_the_citation(self):
         # Reader control for the contracts below: the raw pre-pass has one extra id,
