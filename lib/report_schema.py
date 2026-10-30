@@ -390,19 +390,24 @@ _CONCURRENCY_ADVICE_ROLE_PATTERN = re.compile(
     #      these flipping True->False: the opener supplies the advice and "using" is not a cue we can
     #      afford to accept everywhere, because a gerund subject ("Using Promise.all on unbounded input
     #      exhausts the pool") is a DESCRIPTION. So the advice comes from the opener, not the gerund.
+    #      "maybe"/"perhaps" are deliberately NOT openers: agents-mjhp6 measured that speculation about
+    #      an outcome ("Perhaps asyncio.gather is faster for this workload") is a report, not advice.
     r"(?:^|[;:,.!?]\s*)\s*"
-    r"(?:try|how\s+about|what\s+about|maybe|perhaps|consider)\s+"
+    r"(?:try|how\s+about|what\s+about|consider)\s+"
     r"(?:using\s+|to\s+use\s+|adopting\s+|switching\s+to\s+)?" + _CONCURRENCY_SHAPE +
     # (a1) clause-initial imperative, optionally behind an ADVISORY opener. A bare subject is not an
     # advisory opener: "We use Promise.all to fetch user URLs" describes, "We should use it" advises,
     # and "You use X" is present tense while "You can use X" is advice - so the modal is mandatory
     # when a subject is present, which is what keeps the first-person descriptive case out.
     # The openers are measured, not guessed: agents-9fcl5 found "We could use ..." and
-    # "Let's parallelize ..." flipping to False against the merge-base.
+    # "Let's parallelize ..." flipping to False against the merge-base. "may"/"might" are excluded
+    # from the FIRST-PERSON opener because agents-mjhp6 measured epistemic possibility there -
+    # "We may use Promise.all in some code paths depending on the runtime" reports, and the
+    # second-person "You may want to use ..." keeps its may through the branch below.
     r"|(?:^|[;:,.!?]\s*)\s*"
     r"(?:let'?s\s+|"
     r"you\s+(?:can|could|may|might|should|must)\s+(?:want\s+to\s+)?|"
-    r"we\s+(?:can|could|may|might|should|must|recommend|suggest|ought\s+to|need\s+to)\s+)?"
+    r"we\s+(?:can|could|should|must|recommend|suggest|ought\s+to|need\s+to)\s+)?"
     r"(?:use(?!\s+of\b)|call(?!\s+to\b)|dispatch(?!\s+of\b)|prefer|consider|switch(?:ing)?\s+to|start|run|execute|"
     r"await|issue|send|batch|parallelize|adopt|apply|add|make)\b"
     r"[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
@@ -413,10 +418,59 @@ _CONCURRENCY_ADVICE_ROLE_PATTERN = re.compile(
     #      would cut latency". agents-9fcl5 measured this flipping True->False: the modal is after
     #      the shape here, so neither a1 nor a2 can see it. The predicate list is deliberately about
     #      benefit, not about what the code does, so "Promise.all exhausts the pool" stays descriptive.
-    r"|" + _CONCURRENCY_SHAPE + r"\s+(?:would|could|will|should)\s+"
+    #      `will` is NOT in this modal set: agents-mjhp6 measured that "The change to Promise.all WILL
+    #      reduce memory usage" reports an outcome of a landed change. would/could/should remain
+    #      because they are the conditional and advisory moods the suggestion shapes use.
+    r"|" + _CONCURRENCY_SHAPE + r"\s+(?:would|could|should)\s+"
     r"(?:help|reduce|speed|improve|cut|avoid|make\s+(?:it|them|this|these)|be\s+(?:better|faster|quicker|simpler))\b",
     re.IGNORECASE
 )
+
+# agents-3lr9o: a cue after a comma can open a NOUN-PHRASE SUBJECT rather than an imperative -
+# "In the batch stage, dispatch requests via Promise.all ARE logged and capped". A finite predicate in
+# the same clause after the match is what tells the two apart, and the check is applied ONLY to
+# comma/colon-anchored matches: the comma anchor is exactly what makes the infinitival advice shape
+# work ("To reduce latency, use Promise.all for these fetches", which has no predicate after it).
+_FINITE_PREDICATE_AFTER_MATCH_PATTERN = re.compile(r"\b(?:are|is|was|were|has|have|had)\b", re.IGNORECASE)
+
+# agents-mjhp6: a benchmark or measurement report is an OUTCOME, not advice, whatever mood it uses -
+# "Switching the loader to asyncio.gather should cut p99 latency, AS MEASURED in the benchmark".
+_EVIDENCE_REPORT_MARKER_PATTERN = re.compile(
+    r"\b(?:as\s+measured|measured|benchmarks?|according\s+to|profil(?:er|ed|ing)|per\s+the\s+benchmark)\b",
+    re.IGNORECASE
+)
+
+
+def _has_concurrency_advice_role(text: str) -> bool:
+    """True when some clause in `text` puts the concurrency shape in an ADVICE role (agents-ekrw4).
+
+    Matching alone is not enough - see `_CONCURRENCY_ADVICE_ROLE_PATTERN` - and two measured
+    exceptions are subtracted per match rather than added to the pattern, because both are properties
+    of the CLAUSE the match sits in:
+
+      * a benchmark/measurement marker makes the clause a report of an outcome (agents-mjhp6);
+      * a comma-anchored cue followed by a finite predicate in the same clause is a noun-phrase
+        subject, not an imperative (agents-3lr9o).
+
+    Both were measured True on origin/main before the fix and are residuals of the parent mention
+    bug, not regressions from this branch - so a later round can extend either list with evidence
+    instead of guessing.
+    """
+    for match in _CONCURRENCY_ADVICE_ROLE_PATTERN.finditer(text):
+        # The rest of the clause the match opens, so the two clause-level checks see only their own
+        # sentence: a predicate or a benchmark note in the NEXT clause is not evidence about this one.
+        clause_tail = re.match(r"[^.;\n]*", text[match.end():]).group(0)
+        match_text = text[match.start():match.end()] + clause_tail
+        if _EVIDENCE_REPORT_MARKER_PATTERN.search(match_text):
+            continue
+        # The anchor is part of the MATCH (the alternation consumes the comma), so read it from the
+        # match rather than from the text before it - the first cut looked at the preceding character
+        # and saw the "e" of "stage", which is why this case stayed True through an earlier round.
+        anchored_by_comma = match.group(0).lstrip()[:1] in (",", ":")
+        if anchored_by_comma and _FINITE_PREDICATE_AFTER_MATCH_PATTERN.search(clause_tail):
+            continue
+        return True
+    return False
 
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
@@ -535,7 +589,7 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     # suppression is therefore the answer only when nothing in the sentence advises: it still vetoes
     # "Concurrent execution of inference sessions is unsafe", because a hazard predicate is not an
     # advisory role in any of the shapes above.
-    if _CONCURRENCY_ADVICE_ROLE_PATTERN.search(text):
+    if _has_concurrency_advice_role(text):
         return True
     if _DESCRIPTIVE_HAZARD_PATTERN.search(text):
         return False
