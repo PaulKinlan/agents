@@ -161,19 +161,36 @@ def run_module(module):
         child_env = dict(os.environ, FULL_GATE_SHARD_CHILD="1")
         result = subprocess.run([sys.executable, "-u", "-m", "unittest", module, "-v"],
                                 env=child_env, capture_output=True, text=True, errors="replace",
-                                # 1500, not 240 and not 600. This default is what EXTERNAL CI sees,
-                                # because the host's per-VM env override does not exist there, so it
+                                # 3600, not 1500, not 600 and not 240. This default is what EXTERNAL CI
+                                # sees, because the host's per-VM env override does not exist there, so it
                                 # must cover the SLOWEST module that is legitimately slow. 240 and 600
                                 # both failed that test the same way: a module killed at the bound
                                 # reports NO verdict at all (exit 2, "unknown"), so the gate looks
                                 # unlucky rather than red and the real cause stays hidden.
-                                # Measured 2026-10-27: tests.test_fast_gate_mapping 1206.3s standalone
-                                # (105 tests, exit 0) and tests.test_bd_json_contract 268.3s with ~100s
-                                # of it `bd init` building a Dolt DB from nothing (work, not a hang).
-                                # 1500 covers the slowest with 24% headroom. The 600 was rejected by
-                                # review for exactly this reason and review was right: it was sized on
-                                # the bd-init module and left a 1206s module unwinnable.
-                                timeout=positive_int("FULL_GATE_MODULE_TIMEOUT_S", 1500),
+                                # MEASURED INSIDE A SHARDED GATE, NOT DERIVED (agents-2rv7c; docs/speed.md
+                                # §2 is the snapshot, §7 the recipe that reproduces it): across the 47
+                                # completed full gates on this VM between 2026-10-23 and 2026-10-30 the
+                                # slowest LEGITIMATE module wall was tests.test_fast_gate_mapping at
+                                # 3096.9s with module rc=0, and six runs carried a green module over the
+                                # previous 1500 (1630.3s, 1878.8s, 1985.4s, 2143.6s, 2175.6s, 3096.9s).
+                                # 3600 covers the worst of those with 16% headroom.
+                                # WHY 1500 WAS SHORT, because the reasoning is the reusable part: it was
+                                # sized on a STANDALONE measurement of this same module (1206.3s,
+                                # 2026-10-27, 105 tests, exit 0, 24% headroom) and inside a sharded gate
+                                # the module competes with eleven others for two vCPUs, which measured 2.6x
+                                # the standalone wall. A bound derived from an idle-box run only holds on
+                                # an idle box. The 600 before it was rejected by review for the same class
+                                # of reason and review was right: it was sized on the bd-init module
+                                # (tests.test_bd_json_contract 268.3s, ~100s of it `bd init` building a
+                                # Dolt DB from nothing - work, not a hang) and left a 1206s module
+                                # unwinnable.
+                                # WHAT THE GENEROUS BOUND COSTS, stated because it is real: on a genuine
+                                # hang, CI now waits 3600s before that module is declared unknown instead
+                                # of 1500s. That is the cheap direction. A short bound does not merely
+                                # waste a run - docs/speed.md §1 makes a killed module state 2, and a
+                                # state-2 gate lands nothing, so 1597s of shortfall froze merges (this is
+                                # the agents-a7w8z freeze) while a long bound costs wall once.
+                                timeout=positive_int("FULL_GATE_MODULE_TIMEOUT_S", 3600),
                                 check=False)
         output = result.stdout + result.stderr
         rc = result.returncode
@@ -280,15 +297,25 @@ def main():
     started = time.monotonic()
     expected = discover()
     workers = positive_int("FULL_GATE_SHARDS", min(4, os.cpu_count() or 1))
-    # 3300, not 300. The 300 was measured-appropriate when chosen - docs/speed.md §2 records the whole
-    # 102-module gate at wall=140.959s on 2026-10-15 - but the suite is now ~20x that cost: the fleet's
-    # cost table (2026-10-27) sums 12759s of module time across 106 modules after the three reductions in
-    # agents-z3cp5, which is ~3200s of wall at four shards. A 300s budget therefore marks every honest
-    # CI run "over budget" (exit 3) and tells the operator to wait for a quieter box that cannot exist.
-    # 3300 sits just under CHECK_TIMEOUT=3600 on purpose: the runner's hard bound must not pre-empt the
-    # gate's own verdict, or the run reports a timeout instead of the "over budget" fact that is true.
-    # A DERIVATION, NOT A MEASURED FULL-GATE WALL - that measurement is still missing and this says so.
-    budget = positive_int("FULL_GATE_BUDGET_S", 3300)
+    # 4800, not 3300 and not 300. The 300 was measured-appropriate when chosen - docs/speed.md §2's
+    # 2026-10-15 snapshot records the whole 102-module gate at wall=140.959s - and 3300 was a derivation
+    # from the fleet cost table ("~3200s of wall at four shards") whose own comment admitted the measured
+    # full-gate wall was still missing. IT IS NOT MISSING ANY MORE (agents-2rv7c): the 47 completed full
+    # gates on this VM between 2026-10-23 and 2026-10-30 ran min 372s, p50 1562s, worst PASS 3352s, and
+    # the worst completed run of any state was 3923s - a FAIL on content, which still has to finish to say
+    # WHAT is red. 4800 covers that worst run with 22% headroom. 3300 would have marked the week's best
+    # PASS "over budget" (exit 3), which docs/speed.md §1 also says is not a verdict, and would have told
+    # the operator to wait for a quieter box that this host demonstrably does not have (steal 19.9% at
+    # 76.9% idle, agents-a7w8z).
+    # The shape still explains the median: one cost-table sample (at=2026-10-29T12:40:12Z, 106 modules,
+    # 5851.2s of module wall) divides to 1462.8s at four shards against that tree's 1507s wall, so the gate
+    # is balance-limited and the 372s..3923s spread above that is the host descheduling vCPUs, not the
+    # suite (§2). A budget sized on the balance arithmetic alone is sized on the good day.
+    # 4800 stays under CHECK_TIMEOUT=5400 on purpose: the runner's hard bound must not pre-empt the gate's
+    # own verdict, or the run reports a timeout instead of the "over budget" fact that is true.
+    # tests/test_check_conf_consistency.py now pins both that ordering and this bound's coverage of the
+    # wall docs/speed.md §2 records, so the next re-measurement cannot move one without the other.
+    budget = positive_int("FULL_GATE_BUDGET_S", 4800)
     cost_path = Path(os.environ.get("FLEET_CHECKS_DIR", str(Path.home() / ".fleet/checks"))) / "full-gate-module-costs.json"
     lanes = shard_order(expected, costs_at(cost_path, expected), workers)
     order = [module for lane in lanes for module in lane]

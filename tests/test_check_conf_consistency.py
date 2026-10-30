@@ -81,6 +81,27 @@ def _enforced_budget_constants() -> dict:
     }
 
 
+def _stated_doc_values() -> dict:
+    """Every `NAME=integer` line stated on its own line in docs/speed.md, as {name: value-string}.
+
+    THE SINGLE PARSER OF THE SPEED CONTRACT'S NUMBER LINES (agents-2rv7c). It began as the loop inside
+    test_every_enforced_budget_is_stated_as_name_equals_value, and the guard that pins the bounds to the
+    MEASURED_* snapshot lines needs the same reading - so it is one function, for the reason this module
+    already gives for tools/check.conf (agents-vkti): two copies of a grammar drift, and agreement between
+    two copies is a maintenance claim, not a property.
+
+    The form is deliberately narrow: a whole line, one NAME, one non-negative integer. Prose, tables and
+    fenced examples with anything else on the line are ignored, which is what lets §1's enforced constants
+    and §2's measured walls share one namespace without colliding.
+    """
+    stated = {}
+    for line in SPEED_DOC.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"([A-Z_]+)=(\d+)", line.strip())
+        if match:
+            stated[match.group(1)] = match.group(2)
+    return stated
+
+
 def _discovery_commands() -> list[str]:
     """The core full gate and every additional unittest discovery in deployed CI."""
     commands = []
@@ -555,15 +576,109 @@ class TestTheSpeedContractStatesTheEnforcedBudgets(unittest.TestCase):
         # from two files, and any of them going missing is a parser/rename defect, not agreement.
         self.assertEqual({name for name, value in enforced.items() if value is not None}, set(enforced),
                          f"a budget constant could not be read from the code: {enforced}")
-        stated = {}
-        for line in SPEED_DOC.read_text(encoding="utf-8").splitlines():
-            match = re.fullmatch(r"([A-Z_]+)=(\d+)", line.strip())
-            if match:
-                stated[match.group(1)] = match.group(2)
+        stated = _stated_doc_values()
         disagree = {name: {"code": value, "docs/speed.md": stated.get(name)}
                     for name, value in enforced.items() if stated.get(name) != value}
         self.assertEqual(disagree, {},
                          f"docs/speed.md and the code disagree on the enforced budgets: {disagree}")
+
+
+# agents-2rv7c: each wall docs/speed.md §2 records, and the enforced bound that has to cover it. The pairing
+# is the contract: a per-module wall is what FULL_GATE_MODULE_TIMEOUT_S bounds, a whole-run wall is what
+# FULL_GATE_BUDGET_S bounds, and a fast-gate run is what CHECK_FAST_TIMEOUT bounds.
+_MEASURED_WALL_TO_BOUND = {
+    "MEASURED_WORST_MODULE_WALL_S": "FULL_GATE_MODULE_TIMEOUT_S",
+    "MEASURED_WORST_FULL_GATE_WALL_S": "FULL_GATE_BUDGET_S",
+    "MEASURED_WORST_FAST_GATE_RUN_S": "CHECK_FAST_TIMEOUT",
+}
+
+
+class TestTheEnforcedBoundsCoverTheWallsTheContractRecords(unittest.TestCase):
+    """agents-2rv7c: a bound is only as good as the measurement it was sized on, so pin one to the other.
+
+    WHY THIS EXISTS. Every full-gate bound in this tree was a DERIVATION whose own comment said the
+    measurement did not exist - tools/full-gate.sh: "A DERIVATION, NOT A MEASURED FULL-GATE WALL - that
+    measurement is still missing and this says so", tools/check.conf: "DERIVATION, NOT A MEASUREMENT ... the
+    durable fix is to measure one and pin THIS number to it". The host then produced the measurement (46
+    completed full gates, 2026-10-23..2026-10-29, docs/speed.md §2) and NOTHING compared the two: the tracked
+    bounds stayed at module 1500 / budget 3300 / runner 3600 while a green module ran 3096.9s six times over,
+    the worst PASS took 3352s and the worst completed run took 3923s. Under the tracked numbers those runs are
+    state 2 (a module killed: no verdict) and state 3 (green but over budget: also not a verdict), which is
+    the agents-a7w8z freeze. The gate only kept working because an operator hand-edited the per-VM
+    ~/.fleet/check.conf, and install.sh runs `check-cmd.sh --install --global` - so the numbers that worked
+    were exactly the numbers the next provision would delete.
+
+    WHAT IS ASSERTED: the contract records the three worst walls as NAME=integer lines, every enforced bound
+    covers the wall recorded beside it, and the bounds stay ordered module < budget < CHECK_TIMEOUT so the
+    runner's hard bound cannot pre-empt the gate's own verdict.
+
+    NOT A MACHINE-STATE TEST: both sides are tracked files (docs/speed.md and the two files
+    _enforced_budget_constants reads). Nothing here reads ~/.fleet, so another lane running a gate cannot
+    turn this red - the independence docs/speed.md §4 asks of every test in this suite.
+    """
+
+    def test_the_contract_records_every_wall_a_bound_is_sized_on(self):
+        """A missing snapshot line must fail here, not silently exempt a bound from having evidence."""
+        stated = _stated_doc_values()
+        missing = {name: stated.get(name) for name in _MEASURED_WALL_TO_BOUND
+                   if not str(stated.get(name, "")).isdigit()}
+        self.assertEqual(
+            missing, {},
+            "docs/speed.md §2 stopped recording a wall the bounds are sized on: "
+            f"{missing}. Re-measure with §7 and restore the NAME=integer line - a bound with no "
+            "recorded measurement behind it is the defect this class exists to prevent.")
+
+    def test_every_bound_covers_the_worst_wall_recorded_beside_it(self):
+        enforced = _enforced_budget_constants()
+        stated = _stated_doc_values()
+        self.assertEqual({n for n, v in enforced.items() if v is not None}, set(enforced),
+                         f"a budget constant could not be read from the code: {enforced}")
+        short = {}
+        for measured, bound in _MEASURED_WALL_TO_BOUND.items():
+            wall, limit = int(stated[measured]), int(enforced[bound])
+            if limit < wall:
+                short[bound] = {
+                    "enforced": limit,
+                    measured: wall,
+                    "short_by_s": wall - limit,
+                    "consequence": ("a module killed at its bound reports NO verdict (docs/speed.md §1 "
+                                    "state 2), so the gate reads as unlucky instead of red" if
+                                    bound == "FULL_GATE_MODULE_TIMEOUT_S" else
+                                    "a complete run over this bound is state 3, which §1 also says is not "
+                                    "a verdict" if bound == "FULL_GATE_BUDGET_S" else
+                                    "the runner kills the gate before it can report anything, so even the "
+                                    "over-budget fact is lost"),
+                }
+        self.assertEqual(
+            short, {},
+            f"the enforced bounds no longer cover the walls docs/speed.md §2 records: {short}. Either the "
+            "bounds move to the measurement (tools/full-gate.sh, tools/check.conf) or §2 is re-measured and "
+            "updated in the same commit - never one without the other.")
+
+    def test_the_bounds_stay_ordered_so_the_runner_cannot_preempt_the_verdict(self):
+        """module < budget < CHECK_TIMEOUT, and the fast gate tighter than the full one.
+
+        Each ordering is a different failure if broken: a budget below the module bound makes one
+        legitimately slow module mark every honest run "over budget"; a runner bound below the budget means
+        the fleet's hard timeout kills a gate that was still inside its own budget, so the run reports a
+        timeout instead of the verdict it had reached.
+        """
+        enforced = {name: int(value) for name, value in _enforced_budget_constants().items()}
+        module, budget = enforced["FULL_GATE_MODULE_TIMEOUT_S"], enforced["FULL_GATE_BUDGET_S"]
+        runner, fast = enforced["CHECK_TIMEOUT"], enforced["CHECK_FAST_TIMEOUT"]
+        self.assertLess(
+            module, budget,
+            f"FULL_GATE_MODULE_TIMEOUT_S={module} must stay below FULL_GATE_BUDGET_S={budget}, or a single "
+            "module that legitimately needs its whole bound puts every green run over budget (state 3, "
+            "which docs/speed.md §1 says is not a verdict)")
+        self.assertLess(
+            budget, runner,
+            f"FULL_GATE_BUDGET_S={budget} must stay below CHECK_TIMEOUT={runner}: the runner's hard bound "
+            "has to let the gate finish so it can report its own state, including 'over budget'")
+        self.assertLess(
+            fast, runner,
+            f"CHECK_FAST_TIMEOUT={fast} must stay below CHECK_TIMEOUT={runner} (the ordering "
+            "tools/check.conf's own comment argues for)")
 
 
 class TestConfigIsResolvedLoudly(unittest.TestCase):

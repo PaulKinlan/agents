@@ -13,18 +13,27 @@ constants in §1 are the part that is enforced, and they are pinned against the 
 ## 1. The numbers, as enforced by the code
 
 ```text
-FULL_GATE_BUDGET_S=3300
-FULL_GATE_MODULE_TIMEOUT_S=1500
-CHECK_TIMEOUT=3600
+FULL_GATE_BUDGET_S=4800
+FULL_GATE_MODULE_TIMEOUT_S=3600
+CHECK_TIMEOUT=5400
 CHECK_FAST_TIMEOUT=2400
 ```
 
 | Constant | Default | Declared in | Enforced by |
 |---|---|---|---|
-| `FULL_GATE_BUDGET_S` | 3300 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the gate itself, against its own elapsed wall (derived from the measured cost table, kept under `CHECK_TIMEOUT`) |
-| `FULL_GATE_MODULE_TIMEOUT_S` | 1500 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the per-module subprocess bound (slowest legitimate module measured: 1206.3s) |
-| `CHECK_TIMEOUT` | 3600 | `tools/check.conf` | the fleet runner's hard bound (outside this repo); must exceed `CHECK_FAST_TIMEOUT` |
-| `CHECK_FAST_TIMEOUT` | 2400 | `tools/check.conf` | the same runner's bound for `tools/fast-gate.sh` (a registry-touching fast gate runs the 1206.3s mapping validator) |
+| `FULL_GATE_BUDGET_S` | 4800 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the gate itself, against its own elapsed wall — the worst **completed** run measured, 3923s (§2), plus 22%; kept under `CHECK_TIMEOUT` |
+| `FULL_GATE_MODULE_TIMEOUT_S` | 3600 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the per-module subprocess bound — the slowest **legitimate** module inside a sharded gate, 3096.9s at rc=0 (§2), plus 16% |
+| `CHECK_TIMEOUT` | 5400 | `tools/check.conf` | the fleet runner's hard bound (outside this repo); must exceed both `FULL_GATE_BUDGET_S` and `CHECK_FAST_TIMEOUT` |
+| `CHECK_FAST_TIMEOUT` | 2400 | `tools/check.conf` | the same runner's bound for `tools/fast-gate.sh` — the worst measured fast run, 2000s (§2), plus 20% |
+
+All four are **measurements now, and pinned as such**: `tests/test_check_conf_consistency.py`
+(`TestTheEnforcedBoundsCoverTheWallsTheContractRecords`) reads the worst walls §2 records and fails if a
+bound is shorter than the wall beside it, or if the ordering `module < budget < CHECK_TIMEOUT` breaks.
+Before `agents-2rv7c` every one of them was a derivation — two said so in their own comments
+(`tools/full-gate.sh`: "A DERIVATION, NOT A MEASURED FULL-GATE WALL"; `tools/check.conf`: "the durable fix
+is to measure one and pin THIS number to it") — and nothing compared them with the host, so the numbers
+that actually produced verdicts lived only in an untracked per-VM `~/.fleet/check.conf` that `install.sh`'s
+`--install --global` reverts. Re-measure with §7 and move the bounds **in the same commit**.
 
 `FULL_GATE_SHARDS` (default `min(4, os.cpu_count())`) is not a budget but the divisor the wall is paid
 through; §4 is its arithmetic.
@@ -41,7 +50,59 @@ through; §4 is its arithmetic.
 The fast gate has no budget of its own; `CHECK_FAST_TIMEOUT` is the outer bound, and the fleet runner
 caches its verdict per commit tree.
 
-## 2. Where the wall actually goes (snapshot: 2026-10-15)
+## 2. Where the wall actually goes (snapshot: 2026-10-30)
+
+Two sources, measuring different things. The **cost table**
+(`${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}/full-gate-module-costs.json`) carries per-module walls from the
+last full gate that wrote it. The **verdict records** beside it (`<tree>.json`, plus the `<tree>.log` each
+one names) carry the whole-run wall and every module's wall for every run: **47 completed full gates** (38
+PASS, 9 FAIL) and **117 fast gates** on this VM between 2026-10-23 and 2026-10-30. §7 prints both.
+
+- whole-run walls across those 47: min 372s, **p50 1562s**, worst PASS **3352s** (tree `49a20346`,
+  2026-10-29T03:39), worst completed run of any state **3923s** (sha `3c920ecb`, 2026-10-27T08:51, FAIL on
+  content — a red run still has to finish to say *what* is red, which is why the runner's bound is sized on
+  this number and not on the worst PASS).
+- **the spread is the finding.** The same tree shape ran in 372s and in 3352s, 9x apart, because this VM's
+  vCPUs are descheduled by its host (`agents-a7w8z` measured steal 19.9% at 76.9% idle). A bound sized for
+  the good day kills the bad one, and a killed module is state 2 — no verdict at all, so a merge cannot land.
+- **the cost table is one run's contention, and it moves faster than the suite does.** The same 106-module
+  shape summed **5851.2s** at `at=2026-10-29T12:40:12Z` (tree `0703a195`, largest module
+  `tests.test_fast_gate_mapping` 717.2s) and **1881.5s** at `at=2026-10-30T01:38:01Z` (tree `4be3f163`,
+  largest 240.7s) — 3.1x apart in thirteen hours. Its balance arithmetic still holds run by run
+  (`5851.2 / 4 = 1462.8s` against that tree's 1507s wall, so §4 is right: the wall is the shard balance plus
+  run overhead), but a *bound* sized on the table is sized on whichever run happened to write it last.
+- so §1's module bound comes from the **per-run walls in the verdict logs**. 36 of the 47 runs still have
+  logs; across those, `tests.test_fast_gate_mapping` spans 165.4s to **3096.9s at rc=0** — 18.7x. Six runs
+  carried a green module over the previous 1500s bound: 1630.3s, 1878.8s, 1985.4s, 2143.6s, 2175.6s,
+  3096.9s. `rc=0` is what makes them legitimate: a module killed at its bound reports `rc=124` and no
+  verdict, which is evidence about the bound, not about the work.
+- that worst case is 2.6x the same module's **standalone** measurement (1206.3s, 2026-10-27, 105 tests,
+  exit 0), because a sharded run has eleven other modules competing for two vCPUs. A bound derived from a
+  standalone run is a bound that only holds on an idle box — which is exactly how the previous 1500 was
+  derived, and why it was short by 1597s.
+- fast gate, 117 runs in the same window: `run_s` min 10s, p50 244s, **worst 2000s** against a 2400s bound.
+  `wait_s` — heavy-slot queueing, measured separately (`agents-5n28`) — reached 2242s, so what a lane
+  experiences as a slow fast gate is mostly queue, and the bound is about the run.
+
+The three walls §1's bounds have to cover, recorded as integers so
+`tests/test_check_conf_consistency.py` can pin the bounds to them (rounded **up**: a floor rounded down is a
+floor that quietly stops being one):
+
+```text
+MEASURED_WORST_MODULE_WALL_S=3097
+MEASURED_WORST_FULL_GATE_WALL_S=3923
+MEASURED_WORST_FAST_GATE_RUN_S=2000
+```
+
+Re-measure with §7 and change these three lines **in the same commit as the bounds they drive**. The pin
+fails when a bound is *shorter* than the wall recorded beside it — the direction that costs a verdict; an
+over-generous bound is not a test failure, it is §5's "say so with the measurement". That pin is the
+mechanism the bounds never had: until `agents-2rv7c` they were derivations whose own comments said the
+measurement was missing (`tools/full-gate.sh`: "A DERIVATION, NOT A MEASURED FULL-GATE WALL";
+`tools/check.conf`: "the durable fix is to measure one and pin THIS number to it"), and the host's real
+numbers lived only in an untracked per-VM `~/.fleet/check.conf` that the next `install.sh` would revert.
+
+### The previous snapshot (2026-10-15), kept because §3 argues from it
 
 Read with `fleet-check --status 8a018ce86bc8104ce662c45d7748597c0ee4bf0d` and from the cost table at
 `${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}/full-gate-module-costs.json`:
@@ -57,6 +118,11 @@ Read with `fleet-check --status 8a018ce86bc8104ce662c45d7748597c0ee4bf0d` and fr
 - fast gate, same day: the last recorded PASS on a multi-path delta was 68s against a 180s bound (tree
   `b1a37982…`, sha `1fe39a42`); narrow deltas are ~12s. One record shows `run_s=12, wait_s=109`: the budget
   is about the run, and heavy-slot queueing is measured separately (`agents-5n28`).
+- **what changed by 2026-10-30 is mostly the box, and the suite a little.** Discovery grew 1906 → 2298 ids
+  over 102 → 106 modules (1.21x the tests), while the measured module-wall sum for that shape went
+  562.374s → 1881.5s or 5851.2s depending on the hour (3.3x-10.4x). A 21% larger suite does not explain a
+  3-10x wall, and `tests.test_fast_gate_mapping` alone spans 53.445s → 165.4s..3096.9s across the window.
+  §1's bounds had to move with the host, and the guard now makes the next move a measured one.
 
 **The premise this replaces.** The description on `agents-vy4g6` reads "1487 tests at 0.235 s/test, budget
 blown, growing ~60 s/day". On this tree the suite is 1906 tests and the landing wall is 141s: 28% more tests
@@ -117,8 +183,9 @@ Two consequences worth carrying:
 1. **`FULL_GATE_SHARDS`** — the wall divides by the worker count while the lanes balance. On this shared VM
    that is an operator decision, not a lane's: more workers take CPU from co-tenant lanes, and the
    heavy-slot queue already starves gates (`agents-5n28`: 18s of fast gate behind 629s of queued work).
-2. **Make the largest suites cheaper** — the top six modules are 43% of module wall. Splitting does not help
-   while balanced (§4); reducing work does.
+2. **Make the largest suites cheaper** — §2's snapshots put the largest four-to-six modules at 35-43% of
+   module wall, and one module (`tests.test_fast_gate_mapping`) at up to 3096.9s of a sharded run, which is
+   what §1's module bound is sized on. Splitting does not help while balanced (§4); reducing work does.
 3. **Only then, coverage.** Moving a suite out of the merge gate's default run needs the same evidence an
    arm needs (a named selection rule), an independent reviewer's clearance, and it must never be a skip that
    the gate's accounting cannot see.
@@ -141,9 +208,55 @@ for name, secs in sorted(s.items(), key=lambda kv: -kv[1])[:6]:
     print(f"  {secs:8.3f}  {name}")
 PY
 
+# the DISTRIBUTION behind §1's bounds, which the cost table alone cannot give: whole-run walls from the
+# verdict records, and per-module walls from the log each record names. This is the recipe §2's snapshot was
+# taken with (agents-2rv7c). Move `since` to re-measure; expect the counts to grow while the three maxima
+# only move when a slower run happens - which is when the bounds have to move with it.
+python3 - <<'PY'
+import glob, json, os, re, statistics
+since = "2026-10-23"
+checks = os.path.expanduser(os.environ.get("FLEET_CHECKS_DIR", "~/.fleet/checks"))
+wall = re.compile(r"([\w.]+)\s+wall=([\d.]+)s\s+rc=(\d+)")
+full, fast, worst_module, worst_pass, worst_run = [], [], (0.0, "", ""), 0, 0
+for path in glob.glob(os.path.join(checks, "*.json")):
+    if path.endswith("module-costs.json"):
+        continue
+    try:
+        rec = json.load(open(path))
+    except Exception:
+        continue
+    if not isinstance(rec, dict) or rec.get("at", "") < since or rec.get("state") not in ("PASS", "FAIL"):
+        continue
+    if path.endswith(".fast.json"):
+        fast.append(rec.get("run_s") or 0)
+        continue
+    full.append((rec["at"], rec["state"], rec.get("secs") or 0))
+    worst_run = max(worst_run, rec.get("secs") or 0)
+    if rec["state"] == "PASS":
+        worst_pass = max(worst_pass, rec.get("secs") or 0)
+    log = rec.get("log") or ""
+    if os.path.exists(log):
+        for module, secs, rc in wall.findall(open(log, errors="replace").read()):
+            # rc=0 is what makes a slow module LEGITIMATE: one killed at its bound reports rc=124 and no
+            # verdict, so it is evidence about the bound rather than about the work.
+            if rc == "0" and float(secs) > worst_module[0]:
+                worst_module = (float(secs), module, rec["at"])
+walls = sorted(w for _, _, w in full)
+print(f"full gates in window: {len(walls)}")
+if walls:
+    print(f"  whole-run wall  min {walls[0]}s  p50 {statistics.median(walls):.0f}s  "
+          f"worst PASS {worst_pass}s  worst completed {worst_run}s")
+print(f"  worst legitimate module wall  {worst_module[0]:.1f}s  ({worst_module[1]} at {worst_module[2]})")
+if fast:
+    print(f"fast gates in window: {len(fast)}  run_s p50 {statistics.median(fast):.0f}s  max {max(fast)}s")
+PY
+
 # and the fast tier for the current delta
 bash tools/fast-gate.sh
 ```
 
 Quote a verdict with the sha and tree it belongs to: the record is cached per commit tree, and a PASS for
-another tree is not a PASS for yours.
+another tree is not a PASS for yours. When a re-measurement moves one of §2's `MEASURED_WORST_*` lines,
+`tests/test_check_conf_consistency.py` fails until the bound beside it moves too. That failure is the point:
+it is the only thing standing between a host that got slower and a merge gate that quietly stops being able
+to reach a verdict (`agents-a7w8z`).
