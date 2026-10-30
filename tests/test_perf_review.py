@@ -1237,6 +1237,63 @@ class TestCodeIsNeverParaphrased(unittest.TestCase):
         self.assertEqual(report["findings"][0]["remediation"], remediation)
 
 
+class TestAdviceSurvivesTheHarmItNames(unittest.TestCase):
+    """agents-5rnta: a recommendation that NAMES a harm is still a recommendation.
+
+    A role-based classifier can decide "is this advice?" in two places, and the ORDER matters more
+    than either test: if a hazard-word exemption runs BEFORE the advice-role test, then every
+    imperative that explains why it helps - "Use Promise.all so background jobs don't starve the
+    worker pool", "Run asyncio.gather to flood the cache warmer up front" - classifies as a
+    DESCRIPTION and ships with no reentrancy precondition. That is the dangerous direction, because
+    an advice sentence naming the failure it avoids is exactly the shape a good recommendation has.
+
+    On main the advice decision is made by clause position before any hazard wording is considered,
+    so these sentences classify correctly today. This class is the invariant a future role-based
+    classifier must not invert: it fails the moment a hazard exemption is evaluated first.
+    """
+
+    ADVICE_NAMING_A_HARM = (
+        "Use Promise.all so background jobs don't starve the worker pool.",
+        "Run asyncio.gather to flood the cache warmer up front.",
+        "Use Promise.all here; otherwise requests exhaust the timeout budget.",
+        "Use asyncio.gather so the queue cannot stall.",
+        "Switch to Promise.all and stop the worker pool from starving.",
+    )
+
+    def test_imperative_advice_that_names_a_harm_is_still_advice(self):
+        for advice in self.ADVICE_NAMING_A_HARM:
+            for field_name, other in (("description", "Consider the fan-out."),
+                                      ("remediation", "Waterfall.")):
+                with self.subTest(advice=advice, field=field_name):
+                    found = {"rule_id": "perf-review", field_name: advice}
+                    found["remediation" if field_name == "description" else "description"] = other
+                    self.assertTrue(
+                        is_concurrency_recommendation(found),
+                        "a harm verb in the sentence must not turn advice into a description - "
+                        "the hazard exemption may not run before the advice decision",
+                    )
+
+    def test_such_advice_still_gets_its_reentrancy_precondition(self):
+        # Classifying it is half of it: the guard must act on the advice it is given, or the sentence
+        # ships unguarded. Measured on the REMEDIATION, because that is the text the guard rewrites
+        # and the text has_reentrancy_precondition inspects - a finding whose advice lives only in
+        # `description` is a separate, pre-existing shape (the validator never reads that field).
+        for advice in self.ADVICE_NAMING_A_HARM:
+            with self.subTest(advice=advice):
+                report = {"findings": [{"rule_id": "perf-review", "path": "src/a.ts",
+                                        "line_number": 3, "description": "A serial waterfall.",
+                                        "remediation": advice}]}
+                self.assertTrue(normalize_report(report), "the guard must rewrite this finding")
+                remediation = report["findings"][0]["remediation"]
+                self.assertIn("reentrancy", remediation)
+                # Every clause of the advice is kept. A clause-start otherwise is paraphrased to
+                # "if not," on purpose (agents-gjm4n), so the clause is matched on its own words.
+                for clause in advice.split(";"):
+                    self.assertIn(clause.replace("otherwise ", "").rstrip(".").strip(), remediation,
+                                  "the advice itself is kept inside the branch, not dropped")
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+
 class TestTheOutputContractAsksForWhatTheSchemaRequires(unittest.TestCase):
     """agents-sz8q: the schema required `snippet` on every finding while this SKILL asked for the other six, so a
     finding written from the SKILL alone was rejected - measured on the gendn run as exactly 35 violations for 35
