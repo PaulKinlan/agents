@@ -1108,6 +1108,194 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertEqual(violations_after, [])
 
 
+class TestADescriptiveMentionIsNotAdvice(unittest.TestCase):
+    """agents-ekrw4: a concurrency primitive MENTIONED in findings prose is not advice.
+
+    The guard read a bare `Promise.all` / `asyncio.gather` in title+description as a recommendation.
+    That is right for a remediation or an added diff line - there the fix itself proposes concurrency -
+    but wrong for prose that reports what the code does. Measured on origin/main a468a9ae before the
+    fix: every descriptive sentence below classified True and produced one `unpreconditioned
+    concurrency` violation, so validate_agent_report rejected a report that had only DESCRIBED the
+    code.
+
+    THE CORPUS IS BORROWED, NOT INVENTED. Rows 1-2 are agents-43cso's cases, rows 3-8 are agents-wjqez's
+    nominal and first-person cases, and rows 9-10 are the precision half of agents-ttcyx. Those three
+    beads were closed as SUPERSEDED by agents-ekrw4 rather than as "invalid against main", because
+    each of these reproduces on main; only their regression framing was dead.
+
+    BOTH DIRECTIONS ARE PINNED, for the reason three earlier rounds of this guard produced a recall
+    regression each: a precision fix that stops seeing real advice is not a fix. The difference the
+    classifier has to see is grammatical - who governs the mention - not a longer word list.
+    """
+
+    DESCRIPTIVE = (
+        # agents-43cso case 1: attacker-impact sentence; the harm verbs were missing from the hazard list
+        ("perf-review",
+         "An attacker can use Promise.all to amplify requests and exhaust the connection pool.",
+         "Reorganize the request logic."),
+        # agents-43cso case 2: leading adverbial phrase + subject + present tense
+        ("perf-review",
+         "In the login endpoint, the handler uses Promise.all without a cap.",
+         "Add a concurrency limit."),
+        # agents-wjqez: nominal cues - "the use of X", "a call to X", "the dispatch of X"
+        ("unsafe-concurrency",
+         "Use of Promise.all on unbounded input exhausts the socket pool.",
+         "Bound the concurrency with a semaphore."),
+        ("unsafe-concurrency",
+         "The use of asyncio.gather here creates an unbounded task set from untrusted input.",
+         "Bound the concurrency with a semaphore."),
+        ("unsafe-concurrency",
+         "A call to Promise.all with attacker-controlled length causes memory exhaustion.",
+         "Bound the concurrency with a semaphore."),
+        ("unsafe-concurrency",
+         "The use of Promise.allSettled without inspecting results silently drops rejections.",
+         "Bound the concurrency with a semaphore."),
+        ("unsafe-concurrency",
+         "The dispatch of requests via Promise.all has no concurrency cap.",
+         "Bound the concurrency with a semaphore."),
+        # agents-wjqez: first-person PRESENT. "We use X" describes; only "we should use X" advises.
+        ("unsafe-concurrency",
+         "We use Promise.all to fetch user-supplied URLs, allowing SSRF fan-out.",
+         "Bound the concurrency with a semaphore."),
+        # agents-ttcyx precision half: subject + FACTUAL modal. will/can describe; should/must advise.
+        ("perf-review",
+         "The SDK will use Promise.all to fetch configs.",
+         "Consider the fan-out."),
+        ("perf-review",
+         "The handler can call Promise.all on the batch.",
+         "Consider the fan-out."),
+        # agents-9fcl5 / agents-5rnta: shapes that must stay DESCRIPTIVE while the advice roles grow.
+        # A gerund SUBJECT is a description ("Using X exhausts the pool"), so "using" is not accepted as
+        # a cue on its own; an avoidance cue is not clause-initial, and no advisory modal governs it.
+        ("perf-review",
+         "Using Promise.all on unbounded input exhausts the pool.",
+         "Bound the concurrency."),
+        ("perf-review",
+         "Never use Promise.all; it exhausts the connection pool.",
+         "Bound the concurrency."),
+        ("perf-review",
+         "Do not use Promise.all here, the fan-out saturates the socket pool.",
+         "Bound the concurrency."),
+    )
+
+    # The recall side. None of these may be lost to the precision fix above.
+    ADVICE = (
+        # clause-initial imperative (the shape agents-vorw / hub fleet-4inv pinned as f3)
+        "Run asyncio.gather on background tasks.",
+        # infinitival clause opener: the advice is after the comma
+        "To reduce latency, use Promise.all for these fetches.",
+        # polite second person
+        "You may want to use Promise.all here.",
+        "You can use Promise.all for these fetches.",
+        # first person with an advisory verb - the contrast row for "We use ..." above
+        "We should use Promise.all for the fan-out.",
+        # advisory modal governing the shape mid-clause
+        "These calls should run in parallel.",
+        "We recommend Promise.all here.",
+        # agents-9fcl5: measured True at merge-base 9655e59d, flipped False by the first cut of this
+        # fix, and the reason the LAND-SUMMARY's "every phrasing that worked before" had to be
+        # withdrawn rather than argued with. They stay here so the next widening cannot lose them.
+        "Try using Promise.all for these fetches.",
+        "We could use Promise.all to fetch the user URLs.",
+        "Let's parallelize these calls with asyncio.gather.",
+        "How about using asyncio.gather for the fan-out?",
+        "Switching to Promise.all would reduce latency.",
+        "Promise.all would help.",
+        # agents-5rnta: imperative advice that names its HAZARD as the reason. True at merge-base,
+        # False when the hazard veto was evaluated first - the ordering the reviewer caught.
+        "Use Promise.all so background jobs don't starve the worker pool.",
+        "Run asyncio.gather to flood the cache warmer up front.",
+        "Use Promise.all here; otherwise requests exhaust the timeout budget.",
+    )
+
+    def test_a_descriptive_mention_is_not_a_recommendation(self):
+        for rule_id, description, remediation in self.DESCRIPTIVE:
+            finding = {"rule_id": rule_id, "description": description, "remediation": remediation}
+            with self.subTest(description=description):
+                self.assertFalse(
+                    is_concurrency_recommendation(dict(finding)),
+                    "prose that describes the code was classified as a concurrency recommendation"
+                )
+
+    def test_a_descriptive_mention_produces_no_unpreconditioned_violation(self):
+        """The user-visible effect: a report that only described the code is not withheld."""
+        for rule_id, description, remediation in self.DESCRIPTIVE:
+            finding = {"rule_id": rule_id, "description": description, "remediation": remediation}
+            with self.subTest(description=description):
+                self.assertEqual(
+                    unpreconditioned_concurrency_findings({"findings": [dict(finding)]}), [],
+                    "a finding that merely described the code was withheld as unpreconditioned"
+                )
+                notes = normalize_report({"findings": [dict(finding)]})
+                self.assertFalse(
+                    any("enforced reentrancy precondition" in n for n in notes),
+                    "a descriptive finding must not be annotated with a reentrancy precondition"
+                )
+
+    def test_genuine_advice_survives_the_precision_fix(self):
+        for description in self.ADVICE:
+            finding = {"rule_id": "perf-review", "description": description,
+                       "remediation": "Consider the fan-out."}
+            with self.subTest(description=description):
+                self.assertTrue(
+                    is_concurrency_recommendation(dict(finding)),
+                    "genuine advice in prose stopped being recognised as a recommendation"
+                )
+                self.assertEqual(
+                    len(unpreconditioned_concurrency_findings({"findings": [dict(finding)]})), 1,
+                    "genuine advice in prose must still carry its reentrancy precondition"
+                )
+
+    def test_a_harm_verb_sentence_is_not_read_as_advice(self):
+        """agents-ekrw4 root cause 2: the hazard exemption lacked the verbs these sentences use."""
+        for description in (
+            "An attacker can use Promise.all to amplify requests and exhaust the connection pool.",
+            "Unbounded fan-out saturates the socket pool.",
+            "Concurrent inference starves the event loop.",
+            "The retry storm overwhelms the worker pool.",
+        ):
+            with self.subTest(description=description):
+                self.assertFalse(is_concurrency_recommendation(
+                    {"rule_id": "perf-review", "description": description}
+                ))
+
+
+    def test_advice_outranks_a_hazard_reason_in_the_same_sentence(self):
+        """agents-ekrw4 ordering (reported by impl-cygm4): the hazard list must not veto real advice.
+
+        A recommendation usually gives the hazard as its REASON. If the hazard test ran first, the
+        harm verbs added for precision would create a recall hole in exactly the findings that must
+        stay guarded - the fix would be its own counterexample. Advice is therefore tested first, and
+        hazard suppression only answers when nothing in the sentence advises.
+        """
+        for description in (
+            "Use a worker pool so requests don't exhaust the socket pool.",
+            "Run these in parallel so the batch does not starve the queue.",
+            "Use Promise.all here; unbounded fan-out saturates the socket pool.",
+            "We should fan these out with a worker pool before the retry storm overwhelms it.",
+        ):
+            with self.subTest(description=description):
+                finding = {"rule_id": "perf-review", "description": description}
+                self.assertTrue(
+                    is_concurrency_recommendation(dict(finding)),
+                    "advice that names its hazard as the reason was suppressed by the hazard test"
+                )
+                self.assertEqual(
+                    len(unpreconditioned_concurrency_findings({"findings": [dict(finding)]})), 1,
+                    "advice with a hazard reason must still carry the reentrancy precondition"
+                )
+        # The other side of the order: an AVOIDANCE framed with a hazard stays descriptive, because
+        # the cue is not clause-initial and no advisory modal governs the shape.
+        for description in (
+            "Never use Promise.all; it exhausts the connection pool.",
+            "Do not use Promise.all here, the fan-out saturates the socket pool.",
+        ):
+            with self.subTest(description=description):
+                self.assertFalse(is_concurrency_recommendation(
+                    {"rule_id": "perf-review", "description": description}
+                ))
+
+
 class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
     """agents-gjm4n / agents-3t9oz: "otherwise" states a CONSEQUENCE at least as often as a fallback.
 

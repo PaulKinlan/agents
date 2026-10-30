@@ -359,6 +359,65 @@ def _paraphrase_clause_start_connectors(text: str) -> str:
     pieces.append(text[last:])
     return "".join(pieces)
 
+# `agents-ekrw4`: the hazard words a descriptive finding already used, plus the HARM VERBS these
+# sentences actually use. The old list (unsafe|hazard|race condition|risk|conflict|corrupt|deadlock|
+# defect|flaw) missed "An attacker can use Promise.all to amplify requests and exhaust the connection
+# pool", so an attacker-impact sentence fell through to the mention test and was read as advice.
+_DESCRIPTIVE_HAZARD_PATTERN = re.compile(
+    r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw"
+    r"|amplif(?:y|ies|ied|ying)|exhaust\w*|starve\w*|saturat\w*|overwhelm\w*|deplet\w*|flood\w*)\b",
+    re.IGNORECASE
+)
+
+# `agents-ekrw4`: the ADVICE-ROLE test used only for title/description prose (see the fallback in
+# `is_concurrency_recommendation`). Two shapes count as advice, and both require grammar rather than a
+# primitive noun sitting in a sentence:
+#   (a1) a clause-initial imperative cue - "Run asyncio.gather ...", "To reduce latency, use
+#        Promise.all ...", "You may want to use Promise.all" - where the cue OPENS the clause so a
+#        subject cannot precede it. The cues that form a nominalisation with `of`/`to` are excluded
+#        in that position ("the use of X", "a call to X"), because those are descriptions of a call,
+#        not instructions to make one.
+#   (a2) an advisory modal or recommend-verb within the same clause as the concurrency shape -
+#        "these should run in parallel", "we recommend Promise.all here". Factual modals are NOT
+#        advice: "The SDK WILL use Promise.all" and "The handler CAN call Promise.all" describe.
+_CONCURRENCY_SHAPE = (
+    r"(?:promise\.(?:all|allsettled|race|any)|asyncio\.gather|concurren\w+|parallel\w*|"
+    r"simultane\w*|overlap\w*|worker\s+pool\w*|thread\s+pool\w*|web\s+workers?|p-?limit)"
+)
+_CONCURRENCY_ADVICE_ROLE_PATTERN = re.compile(
+    # (a0) an explicit advisory opener that leads STRAIGHT into the shape, with no cue verb of its own -
+    #      "Try using Promise.all ...", "How about using asyncio.gather ...". agents-9fcl5 measured
+    #      these flipping True->False: the opener supplies the advice and "using" is not a cue we can
+    #      afford to accept everywhere, because a gerund subject ("Using Promise.all on unbounded input
+    #      exhausts the pool") is a DESCRIPTION. So the advice comes from the opener, not the gerund.
+    r"(?:^|[;:,.!?]\s*)\s*"
+    r"(?:try|how\s+about|what\s+about|maybe|perhaps|consider)\s+"
+    r"(?:using\s+|to\s+use\s+|adopting\s+|switching\s+to\s+)?" + _CONCURRENCY_SHAPE +
+    # (a1) clause-initial imperative, optionally behind an ADVISORY opener. A bare subject is not an
+    # advisory opener: "We use Promise.all to fetch user URLs" describes, "We should use it" advises,
+    # and "You use X" is present tense while "You can use X" is advice - so the modal is mandatory
+    # when a subject is present, which is what keeps the first-person descriptive case out.
+    # The openers are measured, not guessed: agents-9fcl5 found "We could use ..." and
+    # "Let's parallelize ..." flipping to False against the merge-base.
+    r"|(?:^|[;:,.!?]\s*)\s*"
+    r"(?:let'?s\s+|"
+    r"you\s+(?:can|could|may|might|should|must)\s+(?:want\s+to\s+)?|"
+    r"we\s+(?:can|could|may|might|should|must|recommend|suggest|ought\s+to|need\s+to)\s+)?"
+    r"(?:use(?!\s+of\b)|call(?!\s+to\b)|dispatch(?!\s+of\b)|prefer|consider|switch(?:ing)?\s+to|start|run|execute|"
+    r"await|issue|send|batch|parallelize|adopt|apply|add|make)\b"
+    r"[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
+    # (a2) advisory modal / recommend verb governing the shape inside one clause
+    r"|\b(?:should|must|ought\s+to|need\s+to|recommend\w*|suggest\w*|consider|better\s+to|"
+    r"good\s+(?:idea|way)\s+to|worth\s+considering)\b[^.;\n]{0,80}?" + _CONCURRENCY_SHAPE +
+    # (a3) the shape as SUBJECT of an advisory predicate - "Promise.all would help", "worker pools
+    #      would cut latency". agents-9fcl5 measured this flipping True->False: the modal is after
+    #      the shape here, so neither a1 nor a2 can see it. The predicate list is deliberately about
+    #      benefit, not about what the code does, so "Promise.all exhausts the pool" stays descriptive.
+    r"|" + _CONCURRENCY_SHAPE + r"\s+(?:would|could|will|should)\s+"
+    r"(?:help|reduce|speed|improve|cut|avoid|make\s+(?:it|them|this|these)|be\s+(?:better|faster|quicker|simpler))\b",
+    re.IGNORECASE
+)
+
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
     re.IGNORECASE
@@ -460,9 +519,27 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
 
     # Fallback to title/description only for affirmative recommendations, not hazard/vulnerability warnings (Reviewer P2)
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
-    if re.search(r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw)\b", text, re.IGNORECASE):
+    # A MENTION IS NOT ADVICE (agents-ekrw4). `_EXECUTION_CONCURRENCY_PATTERN` treats a bare
+    # `Promise.all`/`asyncio.gather` as a recommendation, which is right for a REMEDIATION or an added
+    # diff line - there the fix itself proposes concurrency - but wrong for prose that only reports
+    # what the code does. Description is where findings narrate, so it needs the cue to be governed by
+    # an advisory role: "Run asyncio.gather on background tasks" is advice, "The handler can call
+    # Promise.all on the batch" is not, and the difference is grammar, not vocabulary. Recall is kept
+    # by the imperative and advisory-modal roles below; precision is measured by the corpus in
+    # tests/test_perf_review.py::TestADescriptiveMentionIsNotAdvice.
+    #
+    # ORDER MATTERS, AND ADVICE IS TESTED FIRST (agents-ekrw4, reported by impl-cygm4). A
+    # recommendation very often gives the hazard as its REASON - "Use a worker pool so requests don't
+    # exhaust the socket pool" - so a hazard veto evaluated first would suppress exactly the findings
+    # that must stay guarded, turning the harm verbs added for precision into a recall hole. Hazard
+    # suppression is therefore the answer only when nothing in the sentence advises: it still vetoes
+    # "Concurrent execution of inference sessions is unsafe", because a hazard predicate is not an
+    # advisory role in any of the shapes above.
+    if _CONCURRENCY_ADVICE_ROLE_PATTERN.search(text):
+        return True
+    if _DESCRIPTIVE_HAZARD_PATTERN.search(text):
         return False
-    return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
+    return False
 
 
 # Domains and primitives where concurrency is often non-reentrant or stateful
