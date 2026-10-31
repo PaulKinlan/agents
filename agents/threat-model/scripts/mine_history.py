@@ -142,6 +142,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS
@@ -327,16 +328,56 @@ GIT_IDENTITY_TIMEOUT_S = 15
 FACTORY_FILE_COMPARE_MAX_BYTES = 2 * 1024 * 1024
 
 
+def _identity_git() -> Optional[str]:
+    """Quiet git resolution for the identity probes (agents-yrozu).
+
+    The dispatcher's authenticated handoff (lib.tool_pins.prepass_tool: the fork-time
+    FACTORY_RESOLVED_TOOL_* path host-side, or the read-only-bound pins in the sandbox) is
+    what names the binary these probes execute. An UNAUTHENTICATABLE git is, for identity
+    purposes, the same as a host where git cannot run at all: resolution failure returns
+    None and the caller answers third-party per the fail-toward contract below. It is
+    deliberately NOT the loud exit the mining path uses - identity must never raise into
+    the scan path.
+    """
+    try:
+        return prepass_tool("git")
+    except ToolPinError:
+        return None
+
+
+def _trusted_git() -> str:
+    """The pin-authenticated git path this pre-pass executes (agents-yrozu).
+
+    git is a trusted tool (lib/tool_pins.TRUSTED_TOOLS): a station script's own
+    trusted-tool launch is a census kind of its own (agents-28nn round 4, review P1) —
+    a bare name executes whatever PATH plants first, including on the trusted-private
+    unsandboxed path where no sandbox bind boundary verifies anything, and this script's
+    mined history feeds the model's evidence. Unauthenticatable is LOUD (nonzero exit;
+    the factory turns a failed pre-pass into a StationError), never a quiet empty result
+    that reads like 'no security commits'. Resolution is per call: a post-resolution
+    binary swap never executes under a stale verification.
+    """
+    try:
+        return prepass_tool("git")
+    except ToolPinError as e:
+        sys.stderr.write(f"Error: trusted tool 'git' cannot be authenticated: {e}\n")
+        sys.exit(2)
+
+
 def _git_ok(repo_dir: Path, *args: str) -> bool:
     """Run a read-only git command in `repo_dir`; True only on a clean exit.
 
-    Every failure mode (git missing, not a repository, dubious ownership, a timeout) is False,
-    because identity detection must never raise into the scan path: the contract is to fail
-    toward third-party and let the noise show up.
+    Every failure mode (git missing, unauthenticatable (agents-yrozu), not a repository,
+    dubious ownership, a timeout) is False, because identity detection must never raise
+    into the scan path: the contract is to fail toward third-party and let the noise show
+    up.
     """
+    git_bin = _identity_git()
+    if git_bin is None:
+        return False
     try:
         res = subprocess.run(
-            ["git", "-C", str(repo_dir), *args],
+            [git_bin, "-C", str(repo_dir), *args],
             capture_output=True, text=True, check=False, timeout=GIT_IDENTITY_TIMEOUT_S,
         )
     except Exception:
@@ -346,9 +387,12 @@ def _git_ok(repo_dir: Path, *args: str) -> bool:
 
 def _git_out(repo_dir: Path, *args: str) -> Optional[str]:
     """Run a read-only git command in `repo_dir`; stripped stdout, or None on any failure."""
+    git_bin = _identity_git()
+    if git_bin is None:
+        return None
     try:
         res = subprocess.run(
-            ["git", "-C", str(repo_dir), *args],
+            [git_bin, "-C", str(repo_dir), *args],
             capture_output=True, text=True, check=False, timeout=GIT_IDENTITY_TIMEOUT_S,
         )
     except Exception:
@@ -594,7 +638,7 @@ def mine_git_history(target_dir: Path, nonce: Optional[str] = None, max_commits:
     # Pattern for relevant commits
     pattern = "|".join(SECURITY_KEYWORDS)
     cmd = [
-        "git", "-C", str(target_dir), "log",
+        _trusted_git(), "-C", str(target_dir), "log",
         "-E", f"--grep={pattern}",
         "-n", str(max_commits),
         "--format=%H|%ad|%s",
@@ -609,7 +653,7 @@ def mine_git_history(target_dir: Path, nonce: Optional[str] = None, max_commits:
                 commit_hash, date, subject = parts
                 commit_id = commit_hash[:10]
                 # Get files changed
-                files_cmd = ["git", "-C", str(target_dir), "show", "--name-only", "--format=", commit_hash]
+                files_cmd = [_trusted_git(), "-C", str(target_dir), "show", "--name-only", "--format=", commit_hash]
                 files_res = subprocess.run(files_cmd, capture_output=True, text=True, check=False)
                 raw_files = [f.strip() for f in files_res.stdout.splitlines() if f.strip()]
                 files = [sanitize_untrusted_text(f, max_length=100, nonce=active_nonce) for f in raw_files[:8]]
