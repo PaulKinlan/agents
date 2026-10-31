@@ -197,6 +197,11 @@ REQUIRE_EGRESS_HOSTS: Dict[str, Tuple[str, ...]] = {
     "gh": ("api.github.com",),
     "npm": ("registry.npmjs.org",),
     "npx": ("registry.npmjs.org",),
+    # pip-audit (agents-0qx46): `pip-audit -r` resolves requirements against the PyPI
+    # simple/JSON API (pypi.org) and fetches distribution metadata/files from
+    # files.pythonhosted.org. Declared so a pinned, sandbox-bound pip-audit has the
+    # egress it needs; without it every Python audit degrades to the timeout gap.
+    "pip-audit": ("pypi.org", "files.pythonhosted.org"),
 }
 
 

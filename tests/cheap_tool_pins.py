@@ -27,7 +27,7 @@ from pathlib import Path
 
 # Sorted so the set has one spelling; every name the generator's TOOLS line carries.
 CHEAP_TOOL_NAMES = ("agentapi", "bd", "bwrap", "claude", "gh", "git", "gitleaks", "node", "npm",
-                    "npx", "pi", "semgrep")
+                    "npx", "pi", "pip-audit", "semgrep")
 
 
 def stage_cheap_tools(directory: Path, exclude=()) -> Path:
@@ -35,7 +35,7 @@ def stage_cheap_tools(directory: Path, exclude=()) -> Path:
 
     `exclude` exists for the arms whose SUBJECT is a real system tool: an arm asserting "the real
     system git is still pinned, not the CWD namesake" cannot be handed a git stand-in that would
-    win the lookup. Those arms still get stand-ins for the other eleven, which is where their
+    win the lookup. Those arms still get stand-ins for the other twelve, which is where their
     minutes go - the host's 249 MB `claude` and its node/pi trees, not git.
     """
     directory.mkdir(parents=True, exist_ok=True)

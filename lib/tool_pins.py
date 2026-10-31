@@ -3,7 +3,8 @@
 
 The factory is the highest-privilege component in a run: it resolves its trusted tools
 (``bwrap``, ``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``,
-and the engine binaries ``pi``/``claude``/``agentapi``; ``deepseek`` has no CLI binary, agents-mhv7)
+``pip-audit``, and the engine binaries ``pi``/``claude``/``agentapi``; ``deepseek`` has no CLI
+binary, agents-mhv7)
 by *name* across ``PATH`` and executes them host-side for the pre-pass, the findings
 dispatch, bead promotion — and, for ``bwrap``, the OS sandbox itself. A trojaned binary
 earlier on ``PATH`` — or a hijacked install tree — would run with the factory's GitHub
@@ -117,7 +118,10 @@ UNPINNED_ALLOW_ENV = "FACTORY_ALLOW_UNPINNED_TOOLS"
 # `bwrap` is the sandbox wrapper — the one binary whose integrity decides whether any
 # sandbox exists at all (agents-28nn). `bd`/`git` are the findings store and the
 # worktree/admin; `gh` fetches issues and drives promotion; `semgrep`/`gitleaks` and
-# `node`/`npm`/`npx` are the pre-pass scanners.
+# `node`/`npm`/`npx`/`pip-audit` are the pre-pass scanners. `pip-audit` joined the set at
+# agents-0qx46: the deps-supply-chain pre-pass executed it from PATH order while npm was
+# pin-authenticated — the same trojaned-namesake reach, with the station's own audit
+# evidence as the payoff.
 #
 # `pi`/`claude`/`agentapi` are the ENGINE BINARIES the adapters execute
 # (agents-28nn round 5, review P0 — a demonstrated credential exfiltration): the adapter
@@ -129,7 +133,7 @@ UNPINNED_ALLOW_ENV = "FACTORY_ALLOW_UNPINNED_TOOLS"
 # its adapter is purely payload-only Python HTTP station code, so it executes no host
 # binary and has no binary to pin).
 TRUSTED_TOOLS: Tuple[str, ...] = ("bwrap", "gh", "bd", "git", "semgrep", "gitleaks",
-                                  "node", "npm", "npx",
+                                  "node", "npm", "npx", "pip-audit",
                                   "pi", "claude", "agentapi")
 
 def _unpinned_allowed() -> bool:

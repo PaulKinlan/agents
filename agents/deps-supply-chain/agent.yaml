@@ -12,7 +12,9 @@ capabilities:
   browser: false
   # agents-2x6: the pre-pass runs `npm audit`, so its egress (registry.npmjs.org) is
   # derived from this declaration — the egress-allowlist proxy allows exactly these hosts.
-  requires: [npm]
+  # agents-0qx46: the pre-pass also runs `pip-audit` on Python targets (pypi.org,
+  # files.pythonhosted.org), and pip-audit is a pin-authenticated trusted tool.
+  requires: [npm, pip-audit]
 budget:
   max_minutes: 5
 output:

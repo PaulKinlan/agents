@@ -2,8 +2,9 @@
 # Generate a host-local tool pins file for the Software Factory (agents-3g6).
 #
 # agents-7bj made tool pinning FAIL-CLOSED: every trusted host-side tool (bwrap, gh, bd,
-# git, semgrep, gitleaks, node, npm, npx, and the engine binaries pi, claude, agentapi)
-# must carry a sha256 pin or a real run is refused (deepseek has no CLI binary; agents-mhv7).
+# git, semgrep, gitleaks, node, npm, npx, pip-audit, and the engine binaries pi, claude,
+# agentapi) must carry a sha256 pin or a real run is refused (deepseek has no CLI binary;
+# agents-mhv7).
 # bwrap heads the list: it delivers the OS sandbox itself, so an unpinned bwrap makes the
 # host read as unable to sandbox (agents-28nn). The
 # repo `tools.yaml` ships the format with the pins commented out, because a binary's hash
@@ -215,7 +216,7 @@ if [ -z "$MKDIR" ] || [ -z "$DIRNAME_BIN" ] || [ -z "$DATE" ]; then
   exit 2
 fi
 
-TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
+TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pip-audit pi claude agentapi"
 UNPINNED=""
 
 "$MKDIR" -p "$("$DIRNAME_BIN" "$OUT")"

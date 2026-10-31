@@ -30,7 +30,7 @@ What the sandbox does (allowlist, not denylist — everything unbound is invisib
   ro-bound, and symlinks inside them are resolved to their package root (``bin/``-style
   directory names walked past), so launcher shims and versioned installs (nvm, ``~/.local``)
   work inside without binding whole home subtrees. A pinned trusted tool (bwrap/gh/bd/git/
-  semgrep/gitleaks/node/npm/npx, agents-7bj) has its SHA-256 verified before it is bound; a
+  semgrep/gitleaks/node/npm/npx/pip-audit, agents-7bj) has its SHA-256 verified before it is bound; a
   mismatch fails the wrap closed.
 * **bwrap itself is pinned (agents-28nn).** The wrap's own binary is resolved and
   authenticated by the same tool-pin rule BEFORE it executes: ``_verify_wrap``'s
@@ -107,11 +107,14 @@ SANDBOXED_ENGINES = frozenset({"pi"})
 # nothing else (its read/grep/find/ls tools are builtins or /usr utilities, already visible).
 ENGINE_EXECUTABLES = ("bash", "sh", "env", "node")
 # Audited against agents/*/scripts/*.py: the pre-passes shell out to git, gh, gitleaks and
-# node/npm/npx (the dependency audit), plus python3 for sub-scans; bash/sh/env cover shell
-# shebangs. Only the home-installed tools (node/npm/npx/gitleaks) actually incur a bind —
-# git/gh/python3 resolve under /usr and are already visible.
+# node/npm/npx plus pip-audit (the dependency audit), plus python3 for sub-scans; bash/sh/env
+# cover shell shebangs. Only the home-installed tools (node/npm/npx/gitleaks/pip-audit)
+# actually incur a bind — git/gh/python3 resolve under /usr and are already visible.
+# pip-audit joined at agents-0qx46: a trusted tool the pre-pass executes must be in this set
+# or the sandboxed child can never see it (and the bind boundary is what pin-verifies it).
 PREPASS_EXECUTABLES = (
-    "bash", "sh", "env", "git", "gh", "gitleaks", "node", "npm", "npx", "python3",
+    "bash", "sh", "env", "git", "gh", "gitleaks", "node", "npm", "npx", "pip-audit",
+    "python3",
 )
 
 # Directory names that are structural plumbing of an install tree, not the package itself:

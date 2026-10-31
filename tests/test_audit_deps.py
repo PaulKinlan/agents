@@ -4,7 +4,6 @@
 import importlib.machinery
 import importlib.util
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -589,12 +588,7 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
                 seen.append((cmd, kwargs))
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-            real_which = shutil.which
-
-            def fake_which(name, *args, **kwargs):
-                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
-
-            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
                  mock.patch.object(audit_deps.subprocess, "run", side_effect=fake_run):
                 audit_deps.audit_python(repo)
             self.assertEqual(len(seen), 1)
@@ -610,12 +604,7 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             def timeout_run(cmd, **kwargs):
                 raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-            real_which = shutil.which
-
-            def fake_which(name, *args, **kwargs):
-                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
-
-            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
                  mock.patch.object(audit_deps.subprocess, "run", side_effect=timeout_run):
                 candidates, _ = audit_deps.audit_python(repo)  # must not raise
             self.assertIn(
@@ -633,12 +622,7 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             def garbage_run(cmd, **kwargs):
                 return subprocess.CompletedProcess(cmd, 0, stdout="rate limited; try later", stderr="")
 
-            real_which = shutil.which
-
-            def fake_which(name, *args, **kwargs):
-                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
-
-            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
                  mock.patch.object(audit_deps.subprocess, "run", side_effect=garbage_run):
                 candidates, _ = audit_deps.audit_python(repo)
             self.assertIn(
@@ -660,12 +644,7 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
                 def wrong_shape_run(cmd, **kwargs):
                     return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
 
-                real_which = shutil.which
-
-                def fake_which(name, *args, **kwargs):
-                    return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
-
-                with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+                with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
                      mock.patch.object(audit_deps.subprocess, "run", side_effect=wrong_shape_run):
                     candidates, _ = audit_deps.audit_python(repo)
                 self.assertIn(
@@ -684,18 +663,43 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     cmd, 0, stdout=json.dumps({"dependencies": []}), stderr="")
 
-            real_which = shutil.which
-
-            def fake_which(name, *args, **kwargs):
-                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
-
-            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
                  mock.patch.object(audit_deps.subprocess, "run", side_effect=ok_run):
                 candidates, _ = audit_deps.audit_python(repo)
             self.assertNotIn(
                 "pip-audit-unavailable",
                 [c.get("rule_id") for c in candidates],
             )
+
+    def test_pip_audit_absent_emits_coverage_gap(self):
+        # agents-0qx46: a genuinely absent pip-audit used to skip silently - the station
+        # record said nothing about zero Python vulnerability coverage. The absence must
+        # surface as its own coverage-gap candidate, distinct from the ran-but-failed gap.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+            run_seen = []
+
+            def record_run(cmd, **kwargs):
+                run_seen.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value=None), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=record_run):
+                candidates, _ = audit_deps.audit_python(repo)
+            self.assertIn("pip-audit-absent", [c.get("rule_id") for c in candidates])
+            self.assertNotIn("pip-audit-unavailable", [c.get("rule_id") for c in candidates])
+            self.assertEqual(run_seen, [], "an absent pip-audit must not be executed")
+
+    def test_pip_audit_absent_without_requirements_emits_nothing(self):
+        # No Python manifest -> no Python audit, no gap: the absence only matters when
+        # there is something pip-audit would have audited.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value=None):
+                candidates, _ = audit_deps.audit_python(repo)
+            self.assertNotIn("pip-audit-absent", [c.get("rule_id") for c in candidates])
 
 
 if __name__ == "__main__":
