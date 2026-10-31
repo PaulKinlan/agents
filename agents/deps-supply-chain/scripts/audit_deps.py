@@ -24,7 +24,8 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
-from lib.tool_pins import ToolPinError, resolve_tool, tool_present  # noqa: E402
+from lib.tool_pins import (ToolPinError, dispatcher_resolved_name, prepass_tool,
+                           resolve_tool, tool_present)  # noqa: E402
 
 # agents-09kp3: inner execution bounds for the external audit commands. The station declares
 # budget.max_minutes: 5, and the pre-pass shares that wall with the engine and the findings
@@ -73,19 +74,23 @@ def _pip_audit_binary() -> Optional[str]:
     failure (mismatch, unpinned, malformed pins file) exits 2.
 
     The ABSENT test is tool_present, not the error-message shape _npm_binary parses:
-    resolve_tool enforces the pin BEFORE PATH resolution, so on a host that simply does
+    prepass_tool falls back to resolve_tool when there is no dispatcher snapshot, which
+    enforces the pin BEFORE PATH resolution. On a host that simply does
     not install pip-audit (no pins entry, nothing on PATH) it raises 'is not pinned' — and
     treating that as a refusal would fail every Python-target audit on every host without
     pip-audit. tool_present is the library's own ABSENT vs PRESENT-BUT-UNAUTHENTICATABLE
     discriminator (the dispatcher's prepass_tool_env skips absent tools by the same rule):
     nothing on PATH and no configured pin path means nothing can execute, so there is
     nothing to authenticate — the coverage gap is the honest report. A binary PRESENT on
-    PATH with no pin still reaches resolve_tool and still exits 2.
+    PATH with no pin still reaches prepass_tool and still exits 2. On the unsandboxed
+    path the dispatcher snapshot, not the mutable pins file, decides which binary runs.
     """
     try:
-        if not tool_present("pip-audit"):
+        # A dispatcher-authenticated handoff takes precedence even if the mutable pins
+        # file subsequently changes to make the binary appear absent.
+        if not os.environ.get(dispatcher_resolved_name("pip-audit")) and not tool_present("pip-audit"):
             return None
-        return resolve_tool("pip-audit")
+        return prepass_tool("pip-audit")
     except ToolPinError as e:
         sys.stderr.write(f"Error: pip-audit cannot be authenticated: {e}\n")
         sys.exit(2)

@@ -7,6 +7,7 @@ Verifies that:
 3. agents/deps-supply-chain/scripts/audit_deps.py authenticates `npm` and `pip-audit` and refuses unauthenticated/mismatched binaries, while gracefully handling genuinely absent `npm`/`pip-audit` (the latter with a coverage-gap candidate, agents-0qx46).
 """
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -147,6 +148,38 @@ class TestStationTrustedToolPins(unittest.TestCase):
         self.assertIn("Error: pip-audit cannot be authenticated", res.stderr)
         self.assertFalse((self.tmp / "fake_pip-audit.log").exists(),
                          "unauthenticated pip-audit was executed")
+
+    def test_pip_audit_executes_dispatcher_snapshot_not_divergent_child_pins(self):
+        """An unsandboxed child must not execute a post-dispatch, correctly pinned fake.
+
+        The fork-time path was authenticated before child launch; the effective pins
+        file can be rewritten by the child/operator after that check. A hash-valid
+        replacement pin is therefore not authorization to redirect pip-audit.
+        """
+        verified = self.tmp / "verified-pip-audit"
+        verified_log = self.tmp / "verified.log"
+        verified.write_text(f"#!/bin/sh\necho EXECUTED >> {verified_log}\nprintf '[]\\n'\n",
+                            encoding="utf-8")
+        verified.chmod(0o755)
+        fake = self._plant("pip-audit")
+        digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+        pins = self._pins_file(f"pip-audit:\n  path: {fake}\n  sha256: {digest}\n")
+        (self.target / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
+        env["FACTORY_RESOLVED_TOOL_PIP_AUDIT"] = str(verified)
+        env.pop("FACTORY_PINS_RO_BOUND", None)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True, timeout=15)
+
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(verified_log.exists(), "the dispatcher-authenticated binary did not run")
+        self.assertFalse((self.tmp / "fake_pip-audit.log").exists(),
+                         "the child executed the different binary from its writable pins")
 
     def test_deps_supply_chain_handles_genuinely_absent_pip_audit_with_a_coverage_gap(self):
         """agents-0qx46: a genuinely absent pip-audit is not a loud failure, but it is not
