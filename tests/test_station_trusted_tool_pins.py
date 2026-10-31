@@ -4,7 +4,7 @@
 Verifies that:
 1. agents/perf-review/scripts/scan_perf_changes.py authenticates `git` and refuses unauthenticated/mismatched binaries.
 2. agents/pr-fixer/scripts/collect_failures.py authenticates `git` and refuses unauthenticated/mismatched binaries.
-3. agents/deps-supply-chain/scripts/audit_deps.py authenticates `npm` and refuses unauthenticated/mismatched binaries, while gracefully handling genuinely absent `npm`.
+3. agents/deps-supply-chain/scripts/audit_deps.py authenticates `npm` and `pip-audit` and refuses unauthenticated/mismatched binaries, while gracefully handling genuinely absent `npm`/`pip-audit` (the latter with a coverage-gap candidate, agents-0qx46).
 """
 
 import os
@@ -122,6 +122,107 @@ class TestStationTrustedToolPins(unittest.TestCase):
         self.assertNotIn("Error: npm cannot be authenticated", res.stderr)
         # Verify that npm audit was not attempted: no 'npm-audit-unavailable' coverage gap candidate
         self.assertNotIn("npm-audit-unavailable", res.stdout)
+
+    def test_deps_supply_chain_refuses_unauthenticated_pip_audit(self):
+        """agents-0qx46: deps-supply-chain must refuse unauthenticated pip-audit when it is
+        present on PATH (exit 2) - the pre-pass used to execute pip-audit from PATH order
+        via shutil.which while npm was pin-authenticated."""
+        fake_pip_audit = self._plant("pip-audit")
+        pins = self._pins_file(f"pip-audit:\n  path: {fake_pip_audit}\n  sha256: {'0' * 64}\n")
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        # requirements.txt only (no package.json): the npm path never runs, so the exit 2
+        # can only come from the pip-audit resolution.
+        (self.target / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 2, f"expected exit 2 on pin failure, got {res.returncode}")
+        self.assertIn("Error: pip-audit cannot be authenticated", res.stderr)
+        self.assertFalse((self.tmp / "fake_pip-audit.log").exists(),
+                         "unauthenticated pip-audit was executed")
+
+    def test_deps_supply_chain_handles_genuinely_absent_pip_audit_with_a_coverage_gap(self):
+        """agents-0qx46: a genuinely absent pip-audit is not a loud failure, but it is not
+        silent either - the station record carries a pip-audit-absent coverage-gap candidate
+        so the model must report the missing Python vulnerability coverage."""
+        empty_bin = self.tmp / "empty_bin"
+        empty_bin.mkdir()
+
+        # Pin pip-audit with sha256 but NO path so resolve_tool checks PATH (empty_bin),
+        # genuinely raising 'could not be resolved on PATH' rather than finding a host pin.
+        pins = self._pins_file(f"pip-audit:\n  sha256: {'0' * 64}\n")
+
+        env = os.environ.copy()
+        env["PATH"] = str(empty_bin)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        (self.target / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 0,
+                         f"expected exit 0 when pip-audit is absent, got {res.returncode}: {res.stderr}")
+        self.assertNotIn("Error: pip-audit cannot be authenticated", res.stderr)
+        self.assertIn("pip-audit-absent", res.stdout,
+                      "an absent pip-audit must surface a coverage-gap candidate, not silence")
+
+    def test_deps_supply_chain_refuses_planted_unpinned_pip_audit(self):
+        """agents-0qx46: the attack case — a pip-audit PRESENT on PATH with no pin at all
+        must be refused (exit 2), never executed from PATH order the way the pre-fix
+        shutil.which did."""
+        self._plant("pip-audit")
+        pins = self._pins_file("")  # no pip-audit entry: unpinned
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        (self.target / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 2, f"expected exit 2 on unpinned pip-audit, got {res.returncode}")
+        self.assertIn("Error: pip-audit cannot be authenticated", res.stderr)
+        self.assertFalse((self.tmp / "fake_pip-audit.log").exists(),
+                         "unpinned pip-audit was executed from PATH order")
+
+    def test_deps_supply_chain_absent_unpinned_pip_audit_is_a_gap_not_a_refusal(self):
+        """agents-0qx46: a host that simply does not install pip-audit (no pins entry, nothing
+        on PATH — the state resolve_tool reports as 'is not pinned', because the pin is
+        enforced before resolution) must not fail every Python-target audit. The absence is
+        a coverage gap (exit 0), not a refusal."""
+        empty_bin = self.tmp / "empty_bin"
+        empty_bin.mkdir()
+        pins = self._pins_file("")  # no pip-audit entry
+
+        env = os.environ.copy()
+        env["PATH"] = str(empty_bin)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        (self.target / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 0,
+                         f"expected exit 0 when pip-audit is absent and unpinned, got {res.returncode}: {res.stderr}")
+        self.assertNotIn("Error: pip-audit cannot be authenticated", res.stderr)
+        self.assertIn("pip-audit-absent", res.stdout)
 
     def test_prepass_child_environment_forwards_the_dispatchers_snapshot_not_the_parents_name(self):
         """agents-qbl8 + agents-oq3j: the pre-pass child gets the pins the RUN selected, under the

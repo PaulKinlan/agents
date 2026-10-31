@@ -24,7 +24,7 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
-from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+from lib.tool_pins import ToolPinError, resolve_tool, tool_present  # noqa: E402
 
 # agents-09kp3: inner execution bounds for the external audit commands. The station declares
 # budget.max_minutes: 5, and the pre-pass shares that wall with the engine and the findings
@@ -57,6 +57,37 @@ def _npm_binary() -> Optional[str]:
         if "could not be resolved on PATH" in msg and shutil.which("npm") is None:
             return None
         sys.stderr.write(f"Error: npm cannot be authenticated: {e}\n")
+        sys.exit(2)
+
+
+def _pip_audit_binary() -> Optional[str]:
+    """The pin-authenticated pip-audit binary, or None when pip-audit is genuinely absent.
+
+    Same contract as _npm_binary (agents-0qx46): the pre-pass executed pip-audit from PATH
+    order via shutil.which while npm was pin-authenticated — a trojaned namesake earlier on
+    PATH would run inside the station and its output IS the audit evidence. pip-audit is a
+    trusted tool (lib/tool_pins.TRUSTED_TOOLS), so one PRESENT on PATH that the pin cannot
+    authenticate is a loud failure — never a silent fallback or execution from unverified
+    PATH order. A genuinely ABSENT pip-audit returns None and the caller reports a
+    coverage-gap candidate instead of skipping silently; any other pin or configuration
+    failure (mismatch, unpinned, malformed pins file) exits 2.
+
+    The ABSENT test is tool_present, not the error-message shape _npm_binary parses:
+    resolve_tool enforces the pin BEFORE PATH resolution, so on a host that simply does
+    not install pip-audit (no pins entry, nothing on PATH) it raises 'is not pinned' — and
+    treating that as a refusal would fail every Python-target audit on every host without
+    pip-audit. tool_present is the library's own ABSENT vs PRESENT-BUT-UNAUTHENTICATABLE
+    discriminator (the dispatcher's prepass_tool_env skips absent tools by the same rule):
+    nothing on PATH and no configured pin path means nothing can execute, so there is
+    nothing to authenticate — the coverage gap is the honest report. A binary PRESENT on
+    PATH with no pin still reaches resolve_tool and still exits 2.
+    """
+    try:
+        if not tool_present("pip-audit"):
+            return None
+        return resolve_tool("pip-audit")
+    except ToolPinError as e:
+        sys.stderr.write(f"Error: pip-audit cannot be authenticated: {e}\n")
         sys.exit(2)
 
 # Exclude standard ignored directories including vendor/ (third-party vendored code)
@@ -675,8 +706,8 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     except Exception as e:
         sys.stderr.write(f"Warning reading requirements.txt: {e}\n")
 
-    # Run pip-audit if installed
-    pip_audit_bin = shutil.which("pip-audit")
+    # Run pip-audit if installed — pin-authenticated, never PATH order (agents-0qx46)
+    pip_audit_bin = _pip_audit_binary()
     if pip_audit_bin:
         cmd = [pip_audit_bin, "-r", str(req_path), "--format", "json"]
         pip_audit_data = None
@@ -751,6 +782,25 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                                 "station's egress allowlist declaration with the index host and "
                                 "re-run."),
             })
+    else:
+        # agents-0qx46: an ABSENT pip-audit used to skip the whole Python vulnerability
+        # audit silently — a Python-only target reported a clean scan with zero pip-audit
+        # coverage and nothing in the station record to say so. Mirror the npm path's
+        # honesty: the gap is a candidate the model must report, not a stderr shrug.
+        candidates.append({
+            "type": "coverage-gap",
+            "rule_id": "pip-audit-absent",
+            "severity": "low",
+            "title": "pip-audit is not installed; Python vulnerability coverage is incomplete",
+            "description": ("`pip-audit` could not be resolved on this host, so no Python "
+                            "vulnerability data was collected for this target's "
+                            "requirements.txt. The unpinned-requirement and shipped-artifact "
+                            "divergence checks still ran."),
+            "path": "requirements.txt",
+            "remediation": ("Install `pip-audit` on the factory host (pip install pip-audit), "
+                            "pin it with tools/generate-tool-pins.sh (pass --lookup-path if it "
+                            "installs outside the system dirs), and re-run."),
+        })
 
     # Check for requirements vs shipped artifact divergence (agents-gtq)
     req_versions = get_python_requirements_versions(target_dir)
