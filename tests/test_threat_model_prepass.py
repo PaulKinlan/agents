@@ -11,6 +11,7 @@ Covers:
 """
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agents" / "threat-model" / "scripts"))
+
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 
 import mine_history  # noqa: E402
 
@@ -1415,6 +1418,83 @@ class TestThreatModelOutputContractBound(unittest.TestCase):
         self.assertTrue(any("$.threat_model_markdown: length 16385 exceeds maxLength 16384" in e for e in errors),
                         errors)
 
+
+class TestAuthenticatedGitHandoff(unittest.TestCase):
+    """agents-yrozu: this pre-pass executes the dispatcher's authenticated git, never PATH order.
+
+    Four sites used to launch bare "git" from PATH, ignoring the verified-tool handoff
+    (lib.tool_pins) every sibling pre-pass resolves through (agents-01qd set the pattern in
+    perf-review). A PATH-planted namesake would run with the pre-pass's credentials and feed
+    the model forged history. The two git uses have deliberately different failure contracts
+    and both are pinned:
+    - mining (mine_git_history): resolution failure is LOUD (exit 2), never a quiet [] that
+      reads like "no security commits";
+    - identity probes (_git_ok/_git_out): resolution failure answers False/None per the
+      documented fail-toward-third-party contract, and executes nothing.
+    """
+
+    def _fake_git(self, tmp: Path) -> Path:
+        """A git-shaped executable whose output can only appear if THIS binary ran."""
+        fake = tmp / "fake-git"
+        fake.write_text(
+            "#!/bin/sh\n"
+            "printf 'deadbeef1234|2026-01-01|FAKE-GIT-RAN\\n'\n",
+            encoding="utf-8")
+        fake.chmod(0o755)
+        return fake
+
+    def _gitless_target(self, tmp: Path) -> Path:
+        """A target passing mine_git_history's existence gate without needing real git."""
+        target = tmp / "target"
+        target.mkdir(parents=True)
+        (target / ".git").mkdir()
+        return target
+
+    def test_mining_executes_the_handoff_resolved_binary_not_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake = self._fake_git(tmp_path)
+            target = self._gitless_target(tmp_path)
+            with mock.patch.object(mine_history, "prepass_tool", return_value=str(fake)):
+                commits = mine_history.mine_git_history(target)
+        self.assertEqual(len(commits), 1, f"the handoff-named binary must be the one executed: {commits}")
+        # wrap_untrusted nonce-fences the subject, so the marker arrives fenced.
+        self.assertIn("FAKE-GIT-RAN", commits[0]["subject"])
+        self.assertEqual(commits[0]["hash"], "deadbeef12")
+
+    def test_mining_exits_loudly_when_git_is_unauthenticatable(self):
+        """Unauthenticatable git is LOUD (agents-01qd contract): never a quiet []."""
+        def refuse(name):
+            raise mine_history.ToolPinError("trusted tool 'git' is not pinned")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self._gitless_target(Path(tmp))
+            with mock.patch.object(mine_history, "prepass_tool", side_effect=refuse):
+                with self.assertRaises(SystemExit) as ctx:
+                    mine_history.mine_git_history(target)
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_identity_probes_fail_toward_third_party_without_executing(self):
+        """A probe whose git cannot be authenticated answers third-party and runs nothing."""
+        def refuse(name):
+            raise mine_history.ToolPinError("trusted tool 'git' is not pinned")
+
+        with mock.patch.object(mine_history, "prepass_tool", side_effect=refuse), \
+                mock.patch.object(mine_history.subprocess, "run") as run:
+            self.assertIsNone(mine_history._git_out(Path("/nowhere"), "rev-parse", "HEAD"))
+            self.assertFalse(mine_history._git_ok(Path("/nowhere"), "rev-parse", "HEAD"))
+        run.assert_not_called()
+
+    def test_every_subprocess_launch_uses_a_resolved_git_path(self):
+        """Shape pin on the whole script: no bare "git" launch site may come back.
+
+        Reads mine_history.py's own source and asserts each subprocess command list starts
+        with a resolution call (the handoff), not the bare PATH name the audit flagged.
+        """
+        source = (ROOT / "agents" / "threat-model" / "scripts" / "mine_history.py").read_text(encoding="utf-8")
+        self.assertNotIn('["git",', source, "a bare PATH-order git launch site returned")
+        self.assertGreaterEqual(source.count("prepass_tool(\"git\")"), 2,
+                                "both the mining and identity resolvers must go through the handoff")
 
 
 if __name__ == "__main__":

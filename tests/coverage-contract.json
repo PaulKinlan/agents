@@ -6,6 +6,9 @@
   "lib/child_env.py": [
     "tests/test_promotion.py"
   ],
+  "lib/tool_pins.py": [
+    "tests/test_threat_model_prepass.py"
+  ],
   "tools/check-cmd.sh": [
     "tests/test_check_conf_consistency.py",
     "tests/test_gate_entrypoint_config.py"
