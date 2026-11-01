@@ -310,13 +310,12 @@ def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") 
     return None
 
 # Local git plumbing must not hold the run indefinitely. The default covers diff/patch work;
-# disposable worktree setup and cleanup use shorter bounds below so a wedged checkout cannot
+# disposable worktree setup and cleanup have separate bounds below so a wedged checkout cannot
 # consume the station's allowance and strand independent downstream stations (agents-nf54e).
 GIT_TIMEOUT_SECONDS = 120
-# Disposable worktrees are setup/cleanup, not the station's useful work. A stalled
-# checkout plus two cleanup commands used to consume the line's whole allowance and
-# skip independent downstream stations (agents-nf54e).
-GIT_WORKTREE_ADD_TIMEOUT_SECONDS = 30
+# Disposable worktrees are setup/cleanup, not the station's useful work. Bound a stalled
+# checkout separately from cleanup; the add limit is configurable for slower filesystems.
+GIT_WORKTREE_ADD_TIMEOUT_SECONDS = int(os.environ.get('FACTORY_GIT_WORKTREE_ADD_TIMEOUT_SECONDS', 120))
 GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 10
 
 
@@ -372,7 +371,7 @@ def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
         stderr = (res.stderr or "").strip()
         if res.returncode == 124:
             # Partial stderr may mention an index.lock, but a timed-out checkout is not a
-            # transient lock retry: three attempts would spend up to 90s before cleanup.
+            # transient lock retry: three attempts would exhaust the setup budget before cleanup.
             break
         # If failure is due to a stale worktree registration, prune and retry immediately
         if "already registered worktree" in stderr or "use 'prune'" in stderr:
