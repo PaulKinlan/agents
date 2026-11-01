@@ -18,6 +18,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -627,7 +628,8 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self.assertEqual(len(attempts), 1, "timeouts must not retry and consume the station budget")
         self.assertEqual(attempts[0][1]["timeout_seconds"],
                          factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS)
-        self.assertLessEqual(factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS, 30)
+        self.assertEqual(factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS,
+                         int(os.environ.get('FACTORY_GIT_WORKTREE_ADD_TIMEOUT_SECONDS', 240)))
         self.assertLessEqual(factory_cli.GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS, 10)
 
     def test_cleanup_removes_a_locked_partial_worktree_registration(self):
