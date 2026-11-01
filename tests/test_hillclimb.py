@@ -629,7 +629,7 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self.assertEqual(attempts[0][1]["timeout_seconds"],
                          factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS)
         self.assertEqual(factory_cli.GIT_WORKTREE_ADD_TIMEOUT_SECONDS,
-                         int(os.environ.get('FACTORY_GIT_WORKTREE_ADD_TIMEOUT_SECONDS', 240)))
+                         int(os.environ.get('FACTORY_GIT_WORKTREE_ADD_TIMEOUT_SECONDS', 120)))
         self.assertLessEqual(factory_cli.GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS, 10)
 
     def test_cleanup_removes_a_locked_partial_worktree_registration(self):

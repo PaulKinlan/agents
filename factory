@@ -315,7 +315,7 @@ def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") 
 GIT_TIMEOUT_SECONDS = 120
 # Disposable worktrees are setup/cleanup, not the station's useful work. Bound a stalled
 # checkout separately from cleanup; the add limit is configurable for slower filesystems.
-GIT_WORKTREE_ADD_TIMEOUT_SECONDS = int(os.environ.get('FACTORY_GIT_WORKTREE_ADD_TIMEOUT_SECONDS', 240))
+GIT_WORKTREE_ADD_TIMEOUT_SECONDS = int(os.environ.get('FACTORY_GIT_WORKTREE_ADD_TIMEOUT_SECONDS', 120))
 GIT_WORKTREE_CLEANUP_TIMEOUT_SECONDS = 10
 
 
