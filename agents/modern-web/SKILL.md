@@ -40,15 +40,17 @@ rows and is reported as count-only.
  Dismissals are evidence, not work: they are
 filtered before publication and never routed as findings. `modernization_score` is unaffected by dismissals: they are not modernization work
 
-The factory writes the deterministic pre-pass to `candidates.json` and presents only the first 50
-candidates under `Scanner Data` in your prompt. Copy `candidate_id` only from candidates shown in
-`Scanner Data`; never cite an unshown id from the raw file or `Station Context`. If those shown
-candidates have no ids, omit `candidate_id` and keep the count-only fallback.
+The factory writes the deterministic pre-pass to `candidates.json` and presents at most the first 50
+candidates, split into bounded calls. Answer only for candidates in THIS call; copy each `candidate_id`
+only from candidates shown in `Scanner Data` for this batch. Never cite an unshown id from another
+batch, the raw file, or `Station Context`. If the shown candidates have no ids, omit `candidate_id` and use
+the count-only fallback.
 
 The shape of one dismissal:
 
 ```json
 {
+  "candidate_id": "<copy the id from this batch's Scanner Data>",
   "rule_id": "candidate-evaluated-and-rejected",
   "path": "path/to/file",
   "line_number": 42,
