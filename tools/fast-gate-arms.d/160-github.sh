@@ -9,7 +9,12 @@ fast_gate_arms_160_github() {
       # (action.yml parse plus the untrusted-context guard over every run: body);
       # tests/test_pages_publish_scope.py reads the committed workflows/pages.yml. No
       # suite can EXECUTE a workflow, so this union is the bounded approximation.
-      mapped="$mapped tests/test_ci_action.py tests/test_pages_publish_scope.py"
+      # agents-xeqg9 (merger full-gate finding): tests/test_yaml_mini.py's
+      # test_action_yml_parity_with_pyyaml loads .github/actions/factory/action.yml with
+      # BOTH parsers, so a scalar change here (e.g. a trailing `# v5` comment on a pinned
+      # ref) can break lib/yaml_mini parity while every text-level suite stays green -
+      # the fast gate cannot miss it again.
+      mapped="$mapped tests/test_ci_action.py tests/test_pages_publish_scope.py tests/test_yaml_mini.py"
       ;;
     *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn
   esac
