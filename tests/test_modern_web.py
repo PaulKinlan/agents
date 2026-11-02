@@ -29,6 +29,60 @@ sys.path.insert(0, str(ROOT))
 SCANNER_SCRIPT = ROOT / "agents" / "modern-web" / "scripts" / "scan_modern_web.py"
 
 
+class TestModernWebFiftyCandidatePlan(unittest.TestCase):
+    """The scanner's first 50 identities must fit the station's funded batch plan."""
+
+    def test_fifty_candidates_are_chunked_reconciled_and_funded(self):
+        import yaml
+        from lib.budget import StationBudget
+        from lib.candidate_batching import (batch_candidate_ids, merge_reports, plan_batches,
+                                            resolve_max_candidates_per_call,
+                                            validate_batch_attribution)
+        from lib.findings import candidate_coverage
+
+        config = yaml.safe_load((SCANNER_SCRIPT.parent.parent / "agent.yaml").read_text())
+        candidates = [{"candidate_id": f"cand-modern-{i:03d}", "path": f"ui/{i}.js",
+                       "rule_id": "legacy-pattern", "snippet": "legacy()"} for i in range(50)]
+        batches = plan_batches(candidates, resolve_max_candidates_per_call(config))
+        self.assertEqual([len(batch) for batch in batches], [8] * 6 + [2])
+        budget = StationBudget(config["budget"]["max_minutes"])
+        self.assertIsNone(budget.funding_pressure(len(batches)),
+                          "the 50-candidate plan must not silently shrink per-call allowances")
+        allowance = budget.call_timeout("first batch", len(batches))
+        self.assertAlmostEqual(allowance, budget.declared_seconds - 30 / len(batches), delta=0.1)
+        self.assertLessEqual(allowance * len(batches) + 30, budget.max_seconds + 0.1)
+
+        ids_by_batch = [batch_candidate_ids(batch) for batch in batches]
+        parts = []
+        for index, ids in enumerate(ids_by_batch):
+            rows = [{"candidate_id": cid, "false_positive": True} for cid in ids]
+            validate_batch_attribution(rows, batch_ids=ids, batch_index=index,
+                                       all_batch_ids=ids_by_batch)
+            parts.append({"findings": rows})
+        report = merge_reports(parts, scanned_files=50)
+        cited = [row["candidate_id"] for row in report["findings"]]
+        self.assertEqual(cited, [candidate["candidate_id"] for candidate in candidates])
+        self.assertEqual(report["scanned_files"], 50)
+        coverage = candidate_coverage(50, len(cited), presented_ids=cited, cited_ids=cited)
+        self.assertTrue(coverage["complete"], coverage)
+        self.assertEqual(coverage["candidates_accounted"], 50)
+
+    def test_byte_split_nine_call_plan_remains_funded(self):
+        import yaml
+        from lib.budget import StationBudget
+        from lib.candidate_batching import plan_batches, resolve_max_candidates_per_call
+
+        config = yaml.safe_load((SCANNER_SCRIPT.parent.parent / "agent.yaml").read_text())
+        candidates = [{"candidate_id": f"cand-modern-{i:03d}", "snippet": "x" * 1800}
+                      for i in range(50)]
+        batches = plan_batches(candidates, resolve_max_candidates_per_call(config))
+        self.assertEqual(len(batches), 9, "the byte cap must also constrain the plan")
+        budget = StationBudget(config["budget"]["max_minutes"])
+        self.assertIsNone(budget.funding_pressure(len(batches)))
+        self.assertLessEqual(budget.call_timeout("first batch", len(batches)),
+                             budget.remaining_seconds)
+
+
 def load_scanner_module():
     loader = importlib.machinery.SourceFileLoader("scan_modern_web", str(SCANNER_SCRIPT))
     spec = importlib.util.spec_from_loader("scan_modern_web", loader)

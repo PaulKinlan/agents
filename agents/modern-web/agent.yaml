@@ -12,6 +12,9 @@ capabilities:
   browser: false
   requires: []
 budget:
-  max_minutes: 10
+  # Per engine call: 50 candidates make seven 8-candidate batches. Seven 10-minute
+  # calls exceed the dispatcher's 45-minute station ceiling and get only ~381s each.
+  # Seven 5-minute calls fit, leaving the declared allowance intact.
+  max_minutes: 5
 output:
   schema: report.schema.json
