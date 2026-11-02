@@ -124,6 +124,35 @@ class TestStationTrustedToolPins(unittest.TestCase):
         # Verify that npm audit was not attempted: no 'npm-audit-unavailable' coverage gap candidate
         self.assertNotIn("npm-audit-unavailable", res.stdout)
 
+    def test_npm_executes_dispatcher_snapshot_not_divergent_child_pins(self):
+        """A hash-valid replacement pin cannot redirect npm after dispatch."""
+        verified = self.tmp / "verified-npm"
+        verified_log = self.tmp / "verified-npm.log"
+        verified.write_text(
+            f"#!/bin/sh\necho EXECUTED >> {verified_log}\nprintf '{{\"vulnerabilities\":{{}}}}\\n'\n",
+            encoding="utf-8")
+        verified.chmod(0o755)
+        fake = self._plant("npm")
+        digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+        pins = self._pins_file(f"npm:\n  path: {fake}\n  sha256: {digest}\n")
+        (self.target / "package.json").write_text(
+            '{"name": "test", "dependencies": {"foo": "1.0.0"}}\n', encoding="utf-8")
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
+        env["FACTORY_RESOLVED_TOOL_NPM"] = str(verified)
+        env.pop("FACTORY_PINS_RO_BOUND", None)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True, timeout=15)
+
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(verified_log.exists(), "the dispatcher-authenticated npm did not run")
+        self.assertFalse((self.tmp / "fake_npm.log").exists(),
+                         "the child executed the different npm from its writable pins")
+
     def test_deps_supply_chain_refuses_unauthenticated_pip_audit(self):
         """agents-0qx46: deps-supply-chain must refuse unauthenticated pip-audit when it is
         present on PATH (exit 2) - the pre-pass used to execute pip-audit from PATH order
