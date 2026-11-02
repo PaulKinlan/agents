@@ -60,7 +60,10 @@ runs:
   using: 'composite'
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      # Pinned to the commit its v5 tag points at (verified via git ls-remote, 2026-11-02).
+      # This action runs inside CONSUMERS' workflows with their token - the widest exposure
+      # in the repo - so its third-party steps must be immutable (agents-6noep).
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
       with:
         python-version: '3.11'
 
@@ -162,7 +165,7 @@ runs:
 
     - name: Upload Full Delta Report Artifact
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 (pinned; agents-6noep)
       with:
         name: ${{ steps.run-agent.outputs.artifact_name || env.FACTORY_ARTIFACT_NAME || 'factory-delta-report' }}
         path: ${{ env.FACTORY_DIR }}/findings/

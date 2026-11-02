@@ -11,7 +11,6 @@ the tool refuses bad input rather than describing today's tree.
 """
 
 import os
-import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -230,17 +229,6 @@ class PagesPublishScopeTest(unittest.TestCase):
         self.assertNotIn("path: docs/", text, "the workflow must not upload the whole docs/ tree")
         upload = text.split("upload-pages-artifact", 1)[1]
         self.assertIn("path: _site", upload, "the uploaded artifact must be the staged directory")
-
-    def test_workflow_actions_use_immutable_commit_refs(self):
-        """Every non-local action in the Pages workflow must use a full commit SHA."""
-        text = WORKFLOW.read_text(encoding="utf-8")
-        refs = re.findall(r"^\s*(?:-\s*)?uses:\s*(\S+)", text, flags=re.MULTILINE)
-        self.assertTrue(refs, "the Pages workflow must still declare actions")
-        for ref in refs:
-            if ref.startswith("./"):
-                continue
-            with self.subTest(ref=ref):
-                self.assertRegex(ref, r"^[\w.-]+/[\w.-]+(?:/[\w.-]+)*@[0-9a-f]{40}$")
 
     def test_workflow_fetches_full_history(self):
         """The freshness step verifies a pinned commit with `git cat-file`, which a depth-1 clone lacks."""

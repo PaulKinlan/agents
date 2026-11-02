@@ -51,8 +51,39 @@ def _skip_blank_and_comment(lines: List[str], i: int) -> int:
     return i
 
 
+def _strip_inline_comment(val: str) -> str:
+    """Strip a YAML inline comment from a scalar value, per the comment rules YAML
+    actually defines (agents-xeqg9 full-gate finding, merger-preferred fix).
+
+    - A `#` starts a comment only at the START of the value or when PRECEDED by
+      whitespace, so `repo/path#L1` and `v1#2` keep their `#`; `ref # v5` loses it.
+    - A QUOTED scalar may carry a comment after its closing quote (`'composite' # x`):
+      return the quoted content when the remainder is empty or a comment, and otherwise
+      leave the value untouched so the existing naive quote-pairing behaviour (and its
+      errors) is unchanged for malformed input.
+    - Block scalars never reach this function (they are parsed by _parse_block_scalar,
+      where `#` lines are content).
+    """
+    if not val:
+        return val
+    if val[0] in ("'", '"'):
+        end = val.find(val[0], 1)
+        if end == -1:
+            return val
+        rest = val[end + 1:].strip()
+        if rest == "" or rest.startswith("#"):
+            return val[:end + 1]
+        return val
+    i = val.find("#")
+    while i != -1:
+        if i == 0 or val[i - 1] in " \t":
+            return val[:i].rstrip()
+        i = val.find("#", i + 1)
+    return val
+
+
 def _parse_scalar(raw: str, path: Path, lineno: int) -> Any:
-    val = raw.strip()
+    val = _strip_inline_comment(raw.strip())
     if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
         return val[1:-1]
     if val == "":
@@ -107,6 +138,9 @@ def _split_mapping_entry(stripped: str, path: Path, lineno: int) -> Tuple[str, O
             f"YAML parse error in {path}:{lineno}: invalid mapping key: {key!r}"
         )
     val = val.strip()
+    if val.startswith("#"):
+        # `key: # comment` is the same as `key:` for YAML: the value is empty/null.
+        return key, None
     return key, (val if val else None)
 
 

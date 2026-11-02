@@ -262,7 +262,10 @@ class TestStepSummaryRouting(unittest.TestCase):
 
     def test_the_full_report_is_uploaded_as_a_run_artifact(self):
         block = step_block("Upload Full Delta Report Artifact")
-        self.assertIn("actions/upload-artifact@v4", block)
+        # The action ref must be the IMMUTABLE pin shape, not a mutable tag - the exact
+        # re-pin that moved it to a SHA (agents-6noep) must not need edits here, so assert
+        # the shape, not one literal SHA (the repo-wide invariant test owns the value).
+        self.assertRegex(block, r"actions/upload-artifact@[0-9a-f]{40}(?:\s|#|$)")
         self.assertIn("/findings/", block)
 
     def test_the_comment_no_longer_claims_reports_are_publishable_whole(self):
