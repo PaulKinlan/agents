@@ -11,7 +11,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -25,7 +24,7 @@ if str(FACTORY_ROOT) not in sys.path:
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
 from lib.tool_pins import (ToolPinError, dispatcher_resolved_name, prepass_tool,
-                           resolve_tool, tool_present)  # noqa: E402
+                           tool_present)  # noqa: E402
 
 # agents-09kp3: inner execution bounds for the external audit commands. The station declares
 # budget.max_minutes: 5, and the pre-pass shares that wall with the engine and the findings
@@ -50,13 +49,13 @@ def _npm_binary() -> Optional[str]:
     pin cannot authenticate is a loud failure — never a silent fallback or execution from
     unverified PATH order (agents-01qd). A genuinely ABSENT npm returns None, but any other
     pin or configuration failure (mismatch, unpinned, malformed pins file) exits 2 (agents-syhp).
+    An unsandboxed child uses the dispatcher's authenticated snapshot rather than mutable pins.
     """
     try:
-        return resolve_tool("npm")
-    except ToolPinError as e:
-        msg = str(e)
-        if "could not be resolved on PATH" in msg and shutil.which("npm") is None:
+        if not os.environ.get(dispatcher_resolved_name("npm")) and not tool_present("npm"):
             return None
+        return prepass_tool("npm")
+    except ToolPinError as e:
         sys.stderr.write(f"Error: npm cannot be authenticated: {e}\n")
         sys.exit(2)
 
@@ -73,7 +72,7 @@ def _pip_audit_binary() -> Optional[str]:
     coverage-gap candidate instead of skipping silently; any other pin or configuration
     failure (mismatch, unpinned, malformed pins file) exits 2.
 
-    The ABSENT test is tool_present, not the error-message shape _npm_binary parses:
+    The ABSENT test is tool_present, as in _npm_binary:
     prepass_tool falls back to resolve_tool when there is no dispatcher snapshot, which
     enforces the pin BEFORE PATH resolution. On a host that simply does
     not install pip-audit (no pins entry, nothing on PATH) it raises 'is not pinned' — and
