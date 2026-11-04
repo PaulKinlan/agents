@@ -47,6 +47,27 @@ class TestNormalizePath(unittest.TestCase):
         self.assertEqual(normalize_path(None), "")
         self.assertEqual(normalize_path({"path": "src/a.js"}), "")
 
+    def test_dot_prefixed_paths_keep_their_identity(self):
+        """The prefix is stripped, never the character set.
+
+        lstrip("./") ate every leading dot and slash, so `.github/x` collapsed onto
+        `github/x` and `../x` onto `x`, fingerprinting two distinct paths as one
+        identity and binding findings to the wrong candidate (agents-qp1px).
+        """
+        for value in (".github/workflows/ci.yml", "..src/a.js", "../out/x.js", ".../x"):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_path(value), value)
+
+    def test_stacked_prefix_forms_still_normalise(self):
+        self.assertEqual(normalize_path("././src/a.js"), "src/a.js")
+        self.assertEqual(normalize_path("./"), "")
+        self.assertEqual(normalize_path("."), ".")
+
+    def test_fingerprint_distinguishes_dot_prefixed_from_dotless(self):
+        kept = compute_fingerprint("agent", "rule", ".github/workflows/ci.yml", "x")
+        stripped = compute_fingerprint("agent", "rule", "github/workflows/ci.yml", "x")
+        self.assertNotEqual(kept, stripped)
+
 
 class TestCandidateIndex(unittest.TestCase):
     def _index(self, payload):
