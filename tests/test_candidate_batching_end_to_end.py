@@ -306,6 +306,64 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(BatchedStation):
         self.assertEqual(coverage["rows_without_candidate_id"], 0)
 
 
+class TestAggregateBatchCoverageRetry(BatchedStation):
+    """An omitted disposition in batch 1 must not discard five completed batches or become PASS."""
+
+    def test_missing_claim_gets_one_local_retry_without_replaying_completed_batches(self):
+        # 44 identities / 8 per call reproduces the six-batch shape of the leviroutes run.
+        self.agent(AGENT_YAML.replace("class: proposer", "class: proposer\ncandidate_accounting: aggregate-claimed")
+                   .replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))
+        prepass = self.root / "agents" / "probe" / "scripts" / "prepass.py"
+        prepass.write_text(PREPASS.replace("range(8)", "range(44)"), encoding="utf-8")
+        stub = IDS_AND_ROWS.replace(r'\"candidate_id\":\"$id\"}',
+                                    r'\"candidate_id\":\"$id\",\"covered_candidate_ids\":[\"$id\"]}')
+        stub = stub.replace('for id in "${ids[@]}"; do\n  if [ $first -eq 0 ];',
+                            'for id in "${ids[@]}"; do\n'
+                            '  if [[ "$id" == "cand-perf-000" && "$prompt" != *"previous answer"* ]]; then continue; fi\n'
+                            '  if [ $first -eq 0 ];')
+        self.stub(stub + "printf '%s]}\\n' \"$out\"\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["batch"], r["retried"]) for r in retries], [(1, True)])
+        self.assertIn("cand-perf-000", retries[0]["parse_failure"])
+        self.assertEqual(len(list(run.glob("model_output.batch*.txt"))), 6)
+        self.assertEqual(len(list(run.glob("rejected_model_output.batch*.txt"))), 1)
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        claimed = [cid for row in report["findings"] for cid in row["covered_candidate_ids"]]
+        self.assertEqual(set(claimed), {f"cand-perf-{i:03d}" for i in range(44)})
+        self.assertEqual(len(claimed), 44)
+        self.assertNotIn("INCOMPLETE", res.stdout)
+
+    def test_persistent_omission_stays_incomplete_after_one_retry(self):
+        self.agent(AGENT_YAML.replace("class: proposer", "class: proposer\ncandidate_accounting: aggregate-claimed")
+                   .replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))
+        prepass = self.root / "agents" / "probe" / "scripts" / "prepass.py"
+        prepass.write_text(PREPASS.replace("range(8)", "range(44)"), encoding="utf-8")
+        stub = IDS_AND_ROWS.replace(r'\"candidate_id\":\"$id\"}',
+                                    r'\"candidate_id\":\"$id\",\"covered_candidate_ids\":[\"$id\"]}')
+        stub = stub.replace('for id in "${ids[@]}"; do\n  if [ $first -eq 0 ];',
+                            'for id in "${ids[@]}"; do\n'
+                            '  if [[ "$id" == "cand-perf-000" ]]; then continue; fi\n'
+                            '  if [ $first -eq 0 ];')
+        self.stub(stub + "printf '%s]}\\n' \"$out\"\n")
+        res = self.factory("pi")
+        run = self.run_dir()
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["batch"], r["retried"]) for r in retries],
+                         [(1, True), (1, False)])
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from lib.findings import aggregate_candidate_coverage, read_presented_candidate_ids
+        coverage = aggregate_candidate_coverage(44, report["findings"],
+                                                 presented_ids=read_presented_candidate_ids(run))
+        self.assertFalse(coverage["complete"], res.stdout + res.stderr)
+        self.assertIn("omitted candidate coverage", res.stdout)
+        self.assertEqual(coverage["candidates_accounted"], 43)
+        self.assertIn("cand-perf-000", coverage["reason"])
+
+
 class TestBoundedBatching(BatchedStation):
     def test_a_large_candidate_list_runs_in_bounded_batches_and_merges(self):
         res = self.run_batched()
