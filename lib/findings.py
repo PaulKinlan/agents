@@ -150,7 +150,14 @@ def normalize_path(path: Any) -> str:
     """The one path normalization used for fingerprints and candidate binding."""
     if not isinstance(path, str):
         return ""
-    return path.replace("\\", "/").strip().lstrip("./")
+    # Strip a leading `./` PREFIX, not the character set {'.', '/'}: lstrip("./") ate every
+    # leading dot and slash, so `.github/x` collapsed onto `github/x` and `../x` onto `x`,
+    # fingerprinting two distinct paths as one identity (agents-qp1px). Same idiom as
+    # _normalise_cited_path below.
+    norm = path.replace("\\", "/").strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
 
 def path_resolves_in_target(path: Any, target_dir: Optional[Path]) -> bool:
     """True when `path` names an existing entry inside `target_dir` (agents-0tl).
