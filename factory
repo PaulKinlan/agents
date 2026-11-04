@@ -1086,7 +1086,8 @@ def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
 
 def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (),
                                 run_dir: Optional[Path] = None,
-                                tag: str = "") -> List[Dict[str, Any]]:
+                                tag: str = "",
+                                claim_aggregate_coverage: bool = False) -> List[Dict[str, Any]]:
     """Repair mistranscribed `candidate_id`s in every row array, recording each repair (agents-00sew).
 
     ONLY a unique repair is applied (lib.findings.repair_cited_candidate_id): a truncated tail, a
@@ -1112,7 +1113,8 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (
         batch_refusals: List[Dict[str, Any]] = []
         for record in repair_cited_candidate_ids(rows, presented or (), foreign=foreign or (),
                                                  refusals=batch_refusals,
-                                                 candidate_locations=candidate_locations):
+                                                 candidate_locations=candidate_locations,
+                                                 claim_aggregate_coverage=claim_aggregate_coverage):
             record["array"] = array_name
             repairs.append(record)
         for refusal in batch_refusals:
@@ -2575,6 +2577,24 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                 _attempt_output, agent_dir=agent_dir, agent_cfg=agent_cfg,
                                 target_dir=target_dir, run_dir=run_dir,
                                 tag=f"{_batch_tag}.attempt{_attempt}")
+                            if (_parsed is not None and
+                                    candidate_accounting_mode(agent_cfg) == "aggregate-claimed"):
+                                # A schema-valid answer can still omit a candidate (43/44 across six
+                                # clean batches). Recheck THIS batch while a single bounded retry can
+                                # repair the omission without replaying five completed batches. Never
+                                # manufacture coverage from an anchor or a row's location: only a model
+                                # disposition with an explicit covered id can count toward PASS.
+                                _own_ids = batch_candidate_ids(batches[_batch_index])
+                                repair_report_candidate_ids(
+                                    _parsed, _own_ids, run_dir=run_dir,
+                                    tag=f"{_batch_tag}.attempt{_attempt}",
+                                    claim_aggregate_coverage=True)
+                                _coverage = aggregate_candidate_coverage(
+                                    len(batches[_batch_index]), _parsed["findings"],
+                                    presented_ids=_own_ids, slice_size=len(batches[_batch_index]))
+                                if not _coverage["complete"]:
+                                    _parse_failure = ("candidate coverage incomplete for this batch: "
+                                                      + _coverage["reason"])
                         if not batched or (_res.returncode == 0 and _parse_failure is None):
                             break
                         _last_parse_failure = _parse_failure
@@ -2597,10 +2617,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             "retried": _refusal is None,
                             "not_retried_because": _refusal,
                         })
+                        _failure_label = ("omitted candidate coverage" if _parse_failure and
+                                          _parse_failure.startswith("candidate coverage incomplete") else
+                                          "failed JSON/schema validation" if _parse_failure else
+                                          f"exited {_res.returncode}")
                         if _refusal is not None:
                             print(f"  ⚠️ [batch-retry] batch {_batch_index + 1}/{len(prompts)} "
-                                  f"{'failed JSON/schema validation' if _parse_failure else f'exited {_res.returncode}'}; "
-                                  f"NOT retried: {_refusal}")
+                                  f"{_failure_label}; NOT retried: {_refusal}")
                             if _batch_timeout is not None:
                                 # agents-5eq13: a timed-out batch that gets no retry stays the station's
                                 # TIMEOUT - raised with its own message, so the failure names the batch
@@ -2609,8 +2632,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                 raise StationTimeout(_batch_timeout)
                             break
                         print(f"  🔁 [batch-retry] batch {_batch_index + 1}/{len(prompts)} "
-                              f"{'failed JSON/schema validation' if _parse_failure else f'exited {_res.returncode} with no output'}; "
-                              f"retrying it once (attempt {_attempt + 1}/{_attempts})")
+                              f"{_failure_label}; retrying it once (attempt {_attempt + 1}/{_attempts})")
                     if adapter_res.returncode != 0:
                         # A failed call is the run's answer: later batches cannot rescue it, and
                         # carrying on would spend the budget on a session that already failed.
@@ -2931,7 +2953,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     # re-attach an answer to the wrong candidate instead of rejecting it.
                     foreign=[cid for _other, _batch in enumerate(batches) if _other != _batch_index
                              for cid in batch_candidate_ids(_batch)],
-                    run_dir=run_dir, tag=_tag)
+                    run_dir=run_dir, tag=_tag,
+                    claim_aggregate_coverage=(candidate_accounting_mode(agent_cfg) == "aggregate-claimed"))
                 try:
                     # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
                     # (agents-5230a). Distinct ids satisfied the accounting check while attributing a
@@ -2988,7 +3011,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 run_dir=run_dir, tag="")
             repair_report_candidate_ids(report, batch_candidate_ids(candidates_slice)
                                         if isinstance(candidates_slice, list) else (),
-                                        run_dir=run_dir)
+                                        run_dir=run_dir,
+                                        claim_aggregate_coverage=(candidate_accounting_mode(agent_cfg) == "aggregate-claimed"))
         if report is None:
             model_parse_succeeded = False
             no_verdict = parse_reason or (

@@ -2066,7 +2066,8 @@ def repair_cited_candidate_ids(rows: Any,
                                foreign: Iterable[str] = (),
                                refusals: Optional[List[Dict[str, Any]]] = None,
                                candidate_paths: Optional[Dict[str, str]] = None,
-                               candidate_locations: Optional[Dict[str, Dict[str, Any]]] = None
+                               candidate_locations: Optional[Dict[str, Dict[str, Any]]] = None,
+                               claim_aggregate_coverage: bool = False
                                ) -> List[Dict[str, Any]]:
     """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
 
@@ -2106,7 +2107,9 @@ def repair_cited_candidate_ids(rows: Any,
     # missing-id rule must not double-book a candidate an id-text row already names, and the duplicate
     # rule can only see duplicates among the citations that survived.
     if candidate_locations:
-        repair_missing_candidate_ids_by_location(rows, presented, candidate_locations, repairs, refusals)
+        repair_missing_candidate_ids_by_location(
+            rows, presented, candidate_locations, repairs, refusals,
+            claim_aggregate_coverage=claim_aggregate_coverage)
     repair_duplicate_citations_by_path(rows, presented, candidate_paths, repairs, refusals)
     return repairs
 
@@ -2118,7 +2121,8 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                                             presented: Iterable[str],
                                             locations: Optional[Dict[str, Dict[str, Any]]],
                                             repairs: List[Dict[str, Any]],
-                                            refusals: Optional[List[Dict[str, Any]]] = None
+                                            refusals: Optional[List[Dict[str, Any]]] = None,
+                                            *, claim_aggregate_coverage: bool = False
                                             ) -> List[Dict[str, Any]]:
     """Give a row that carries NO candidate_id the one presented candidate its own location names (agents-op02b).
 
@@ -2325,6 +2329,20 @@ def repair_missing_candidate_ids_by_location(rows: Any,
         record = {"cited": None, "repaired": target,
                   "rule": "+".join(["path+line" if best_rank == 1 else "path"] + narrowed_on),
                   "path": row.get("path")}
+        if claim_aggregate_coverage and "anchor_candidate_id" not in row:
+            # An anchor-only row explicitly chooses primary identity but does NOT claim coverage;
+            # preserve that contract and leave it for the bounded batch retry. Only the opt-in
+            # aggregate station treats an otherwise location-bound finding as a disposition.
+            # Preserve any explicit many-to-one claims, do not duplicate an existing one, and record
+            # the inferred claim alongside the identity repair for audit. Ambiguous/sibling locations
+            # have already been refused above; callers must not infer coverage for those rows.
+            covered = row.get("covered_candidate_ids")
+            if isinstance(covered, list) and target not in covered:
+                covered.append(target)
+                record["coverage_added"] = target
+            elif covered is None:
+                row["covered_candidate_ids"] = [target]
+                record["coverage_added"] = target
         repairs.append(record)
         applied.append(record)
     return applied

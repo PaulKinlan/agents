@@ -2220,6 +2220,38 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
         self.assertTrue(coverage["complete"], coverage)
         self.assertEqual(coverage["rows_without_candidate_id"], 0)
 
+    def test_aggregate_location_repair_also_claims_the_bound_candidate(self):
+        rows = [{"path": "src/a.ts", "line_number": 10,
+                 "covered_candidate_ids": ["cand-3"]},
+                {"path": "src/a.ts", "line_number": 20}]
+        repairs = repair_cited_candidate_ids(
+            rows, self.PRESENTED, candidate_locations=self.LOCATIONS,
+            claim_aggregate_coverage=True)
+        self.assertEqual(rows[0]["covered_candidate_ids"], ["cand-3", "cand-1"])
+        self.assertEqual(rows[1]["covered_candidate_ids"], ["cand-2"])
+        self.assertEqual([r["coverage_added"] for r in repairs], ["cand-1", "cand-2"])
+        # Without aggregate opt-in the ordinary row contract is unchanged.
+        ordinary = [{"path": "src/b.ts"}]
+        repair_cited_candidate_ids(ordinary, self.PRESENTED, candidate_locations=self.LOCATIONS)
+        self.assertNotIn("covered_candidate_ids", ordinary[0])
+
+    def test_anchor_only_remains_unclaimed_despite_location_binding(self):
+        rows = [{"path": "src/b.ts", "line_number": 5, "anchor_candidate_id": "cand-3"}]
+        repairs = repair_cited_candidate_ids(
+            rows, self.PRESENTED, candidate_locations=self.LOCATIONS,
+            claim_aggregate_coverage=True)
+        self.assertEqual(rows[0]["candidate_id"], "cand-3")
+        self.assertNotIn("covered_candidate_ids", rows[0])
+        self.assertNotIn("coverage_added", repairs[0])
+
+    def test_ambiguous_location_cannot_infer_aggregate_coverage(self):
+        rows = [{"path": "src/a.ts"}]
+        repairs = repair_cited_candidate_ids(
+            rows, self.PRESENTED, candidate_locations=self.LOCATIONS,
+            claim_aggregate_coverage=True)
+        self.assertEqual(repairs, [])
+        self.assertNotIn("covered_candidate_ids", rows[0])
+
     def test_a_unique_path_is_enough_when_the_row_names_no_line(self):
         rows = [{"path": "./src/b.ts"}]
         repairs, refusals = self.repair(rows)
