@@ -309,6 +309,20 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(BatchedStation):
 class TestAggregateBatchCoverageRetry(BatchedStation):
     """An omitted disposition in batch 1 must not discard five completed batches or become PASS."""
 
+    def test_location_bound_rows_acquire_claims_before_batch_coverage_check(self):
+        self.agent(AGENT_YAML.replace("class: proposer", "class: proposer\ncandidate_accounting: aggregate-claimed"))
+        # The row names a unique pre-pass location but has neither an id nor coverage.
+        self.stub(OMITTING_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([row["covered_candidate_ids"] for row in report["findings"]],
+                         [[f"cand-perf-{i:03d}"] for i in range(CANDIDATE_COUNT)])
+        self.assertFalse((run / "batch_retries.json").exists(), "bound rows need no second model call")
+        repair = json.loads((run / "candidate_id_repairs.batch1.json").read_text(encoding="utf-8"))
+        self.assertEqual(repair[0]["coverage_added"], "cand-perf-000")
+
     def test_missing_claim_gets_one_local_retry_without_replaying_completed_batches(self):
         # 44 identities / 8 per call reproduces the six-batch shape of the leviroutes run.
         self.agent(AGENT_YAML.replace("class: proposer", "class: proposer\ncandidate_accounting: aggregate-claimed")
