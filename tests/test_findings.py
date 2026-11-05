@@ -2353,14 +2353,15 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
             (run / "candidates.json").write_text(json.dumps({"candidates": [
                 {"candidate_id": "aaaa1111bbbb2222", "path": "assets/css/vendor.css",
                  "line_number": 1, "rule_id": "  Legacy-Reset ",
-                 "title": "Vendor   reset contradicts native normalize"},
+                 "title": "Vendor   reset contradicts native normalize", "snippet": "  --reset: none;  "},
                 {"candidate_id": "cccc3333dddd4444", "path": "assets/css/vendor.css",
                  "line_number": 1, "rule_id": "unused-vendor-prefix"},
             ]}), encoding="utf-8")
             self.assertEqual(read_candidate_locations(run), {
                 "aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
                                      "rule_id": "legacy-reset",
-                                     "title": "vendor reset contradicts native normalize"},
+                                     "title": "vendor reset contradicts native normalize",
+                                     "match_text": "--reset: none;"},
                 "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
                                      "rule_id": "unused-vendor-prefix"}})
 
@@ -2385,6 +2386,93 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
         self.assertTrue(after["complete"], after)
         self.assertEqual(after["candidates_accounted"], 7)
         self.assertEqual(after["rows_without_candidate_id"], 0)
+
+
+class TestRelocatedFindingCandidateRepair(unittest.TestCase):
+    """A model may name an implementation file rather than the scanner's evidence file."""
+
+    LOCATIONS = {
+        "modal": {"path": "src/QRPage.js", "line": 7, "rule_id": "legacy-custom-modal",
+                  "title": "Custom modal instead of dialog", "match_text": "role='dialog'"},
+        "other": {"path": "src/other.js", "line": 9, "rule_id": "legacy-tooltip"},
+    }
+
+    def repair(self, rows, locations=None, presented=None, aggregate=False):
+        refusals = []
+        repairs = repair_cited_candidate_ids(
+            rows, ["modal", "other"] if presented is None else presented,
+            candidate_locations=self.LOCATIONS if locations is None else locations,
+            refusals=refusals, claim_aggregate_coverage=aggregate)
+        return repairs, refusals
+
+    def test_unique_rule_recovers_relocated_qrcode_finding(self):
+        rows = [{"path": "src/QRCodeCamera.js", "line_number": 42,
+                 "rule_id": "legacy-custom-modal", "title": "Custom modal instead of dialog"}]
+        repairs, refusals = self.repair(rows, aggregate=True)
+        self.assertEqual(rows[0]["candidate_id"], "modal")
+        self.assertNotIn("covered_candidate_ids", rows[0],
+                         "rule-only relocation repairs identity, not an aggregate disposition")
+        self.assertEqual(repairs[0]["rule"], "relocated-rule_id")
+        self.assertEqual(repairs[0]["candidate_path"], "src/QRPage.js")
+        self.assertEqual(refusals, [])
+
+    def test_repeated_rule_needs_exact_scanner_evidence(self):
+        locations = {**self.LOCATIONS, "sibling": {"path": "src/sibling.js", "line": 3,
+                     "rule_id": "legacy-custom-modal", "match_text": "<dialog>"}}
+        rows = [{"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal",
+                 "snippet": "role='dialog'"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual(rows[0]["candidate_id"], "modal")
+        self.assertEqual(repairs[0]["rule"], "relocated-rule_id+match_text")
+        self.assertEqual(refusals, [])
+
+    def test_exact_location_takes_priority_over_relocation_in_either_row_order(self):
+        for relocated_first in (True, False):
+            relocated = {"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal"}
+            exact = {"path": "src/QRPage.js", "line_number": 7}
+            rows = [relocated, exact] if relocated_first else [exact, relocated]
+            repairs, refusals = self.repair(rows)
+            self.assertEqual(exact["candidate_id"], "modal")
+            self.assertNotIn("candidate_id", relocated)
+            self.assertEqual(len(repairs), 1)
+            self.assertIn("uncited presented candidate", refusals[0]["reason"])
+
+    def test_two_presented_candidates_with_same_rule_remain_ambiguous(self):
+        locations = {**self.LOCATIONS, "sibling": {"path": "src/sibling.js", "line": 3,
+                     "rule_id": "legacy-custom-modal"}}
+        rows = [{"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal"}]
+        repairs, refusals = self.repair(rows, locations=locations,
+                                        presented=["modal", "sibling", "other"])
+        self.assertEqual(repairs, [])
+        self.assertNotIn("candidate_id", rows[0])
+        self.assertIn("modal, sibling", refusals[0]["reason"])
+
+    def test_repeated_rule_without_exact_evidence_refuses_even_if_one_is_presented(self):
+        locations = {**self.LOCATIONS, "unshown": {"path": "src/unshown.js", "line": 4,
+                     "rule_id": "legacy-custom-modal"}}
+        rows = [{"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual(repairs, [])
+        self.assertNotIn("candidate_id", rows[0])
+        self.assertIn("did not single out", refusals[0]["reason"])
+
+    def test_unique_unshown_rule_and_conflicting_title_refuse(self):
+        rows = [{"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal",
+                 "title": "A tooltip"}]
+        locations = {**self.LOCATIONS, "unshown": {"path": "src/unshown.js", "line": 4,
+                     "rule_id": "unshown-rule"}}
+        locations["other"] = {**locations["other"], "title": "A tooltip"}
+        self.assertEqual(self.repair(rows, locations=locations)[0], [])
+        self.assertNotIn("candidate_id", rows[0])
+        unshown_rows = [{"path": "src/QRCodeCamera.js", "rule_id": "unshown-rule"}]
+        self.assertEqual(self.repair(unshown_rows, locations=locations)[0], [])
+        self.assertNotIn("candidate_id", unshown_rows[0])
+
+    def test_unmatched_rule_and_idless_path_do_not_bind(self):
+        for row in ({"path": "src/QRCodeCamera.js", "rule_id": "unknown"},
+                    {"path": "src/QRCodeCamera.js"}):
+            self.assertEqual(self.repair([row])[0], [])
+            self.assertNotIn("candidate_id", row)
 
 
 class TestASharedLocationIsNarrowedByTheRowsOwnRuleOrTitle(unittest.TestCase):
