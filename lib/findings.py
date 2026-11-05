@@ -93,7 +93,6 @@ from lib.sinks.github import promote_issue
 # and the rule also normalises a digit string to its int, so a stored "12" and a scanned 12 are the
 # same line instead of two spellings of it.
 from lib.line_numbers import usable_line_number
-from lib.candidate_identity import candidate_match_text
 
 
 # Keys of a per-run delta. `false_positive` counts findings the triage itself declared false
@@ -1762,6 +1761,15 @@ def read_candidate_paths(run_dir: Any) -> Dict[str, str]:
             if location.get("path")}
 
 
+def _candidate_match_text(candidate: Dict[str, Any]) -> str:
+    """Scanner match text, locally defined because findings.py is staged standalone by dispatch tests."""
+    for field in ("raw_match", "snippet"):
+        value = candidate.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
     """`candidate_id -> {"path": <normalised>, "line": <int|None>, "rule_id", "title"}` per candidate.
 
@@ -1802,7 +1810,7 @@ def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
                 location[field] = identity
         # Exact scanner evidence can distinguish two instances of one rule after the model moves
         # a finding to another file. Never derive this from model prose or from the candidate id.
-        match_text = candidate_match_text(candidate)
+        match_text = _candidate_match_text(candidate)
         if match_text:
             location["match_text"] = match_text
         locations.setdefault(cid.strip(), location)
@@ -2220,47 +2228,7 @@ def repair_missing_candidate_ids_by_location(rows: Any,
         scored = sorted((rank(location, path, line), cid) for cid, location in own.items()
                         if rank(location, path, line) is not None)
         if not scored:
-            # A model can move its finding to the implementation file rather than the scanner's
-            # evidence file. Only reconcile a row with a real path and an EXACT rule label in the
-            # full pre-pass population. A unique rule suffices; repeated rules need an exact
-            # scanner match_text as additional evidence. An unshown sibling can never be claimed.
-            rule = _normalise_identity_text(row.get("rule_id"))
-            matches = {cid: location for cid, location in locations.items()
-                       if isinstance(location, dict)
-                       and rule and _normalise_identity_text(location.get("rule_id")) == rule}
-            repeated_rule = len(matches) > 1
-            evidence = candidate_match_text(row)
-            if repeated_rule and evidence:
-                matches = {cid: location for cid, location in matches.items()
-                           if location.get("match_text") == evidence}
-            target = next(iter(matches)) if len(matches) == 1 else None
-            # A model's title must not identify a DIFFERENT candidate in the same pre-pass.
-            identity = {field: _normalise_identity_text(row.get(field))
-                        for field in _LOCATION_IDENTITY_FIELDS}
-            if target and _contradicting_identity(list(locations), locations, identity, target):
-                target = None
-            if target and target in own and target not in cited:
-                row["candidate_id"] = target
-                cited.add(target)
-                record = {"cited": None, "repaired": target,
-                          "rule": "relocated-rule_id+match_text" if repeated_rule
-                          else "relocated-rule_id", "path": row.get("path")}
-                if claim_aggregate_coverage and "anchor_candidate_id" not in row:
-                    covered = row.get("covered_candidate_ids")
-                    if isinstance(covered, list) and target not in covered:
-                        covered.append(target)
-                        record["coverage_added"] = target
-                    elif covered is None:
-                        row["covered_candidate_ids"] = [target]
-                        record["coverage_added"] = target
-                repairs.append(record)
-                applied.append(record)
-                continue
-            if refusals is not None:
-                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
-                                 "reason": (f"row carries no candidate_id and its path {path!r} names none of "
-                                            f"the {len(own)} presented candidate(s); relocated rule/evidence "
-                                            "did not single out an uncited presented candidate")})
+            # Defer weaker rule-based relocation until exact-location rows have claimed their ids.
             continue
         best_rank = scored[0][0]
         at_best = [cid for rank_here, cid in scored if rank_here == best_rank]
@@ -2388,6 +2356,47 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                 record["coverage_added"] = target
         repairs.append(record)
         applied.append(record)
+    # Relocation is weaker than path+line evidence, regardless of report row order.
+    for row in rows_list:
+        current = row.get("candidate_id")
+        if isinstance(current, str) and current.strip():
+            continue
+        path = _normalise_cited_path(row.get("path"))
+        if not path or any(location.get("path") == path for location in own.values()):
+            continue
+        rule = _normalise_identity_text(row.get("rule_id"))
+        matches = {cid: location for cid, location in locations.items()
+                   if isinstance(location, dict) and rule
+                   and _normalise_identity_text(location.get("rule_id")) == rule}
+        repeated_rule = len(matches) > 1
+        evidence = _candidate_match_text(row)
+        if repeated_rule and evidence:
+            matches = {cid: location for cid, location in matches.items()
+                       if location.get("match_text") == evidence}
+        target = next(iter(matches)) if len(matches) == 1 else None
+        identity = {field: _normalise_identity_text(row.get(field))
+                    for field in _LOCATION_IDENTITY_FIELDS}
+        if target and (_contradicting_identity(list(locations), locations, identity, target)
+                       or any(location.get("path") == path for location in elsewhere.values())):
+            target = None
+        if target and target in own and target not in cited:
+            row["candidate_id"] = target
+            cited.add(target)
+            record = {"cited": None, "repaired": target,
+                      "rule": "relocated-rule_id+match_text" if repeated_rule
+                      else "relocated-rule_id", "path": row.get("path"),
+                      "candidate_path": own[target]["path"]}
+            # Rule-only inference restores identity, not an aggregate-claimed disposition.
+            repairs.append(record)
+            applied.append(record)
+            continue
+        if refusals is not None:
+            named = ", ".join(sorted(matches)[:MISSING_ROW_NAMED_CANDIDATES])
+            detail = f"matching candidates: {named}" if named else "no exact rule/evidence match"
+            refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                             "reason": (f"row carries no candidate_id and its path {path!r} names none of "
+                                        f"the {len(own)} presented candidate(s); relocated rule/evidence "
+                                        f"did not single out an uncited presented candidate ({detail})")})
     return applied
 
 

@@ -2410,8 +2410,10 @@ class TestRelocatedFindingCandidateRepair(unittest.TestCase):
                  "rule_id": "legacy-custom-modal", "title": "Custom modal instead of dialog"}]
         repairs, refusals = self.repair(rows, aggregate=True)
         self.assertEqual(rows[0]["candidate_id"], "modal")
-        self.assertEqual(rows[0]["covered_candidate_ids"], ["modal"])
+        self.assertNotIn("covered_candidate_ids", rows[0],
+                         "rule-only relocation repairs identity, not an aggregate disposition")
         self.assertEqual(repairs[0]["rule"], "relocated-rule_id")
+        self.assertEqual(repairs[0]["candidate_path"], "src/QRPage.js")
         self.assertEqual(refusals, [])
 
     def test_repeated_rule_needs_exact_scanner_evidence(self):
@@ -2423,6 +2425,27 @@ class TestRelocatedFindingCandidateRepair(unittest.TestCase):
         self.assertEqual(rows[0]["candidate_id"], "modal")
         self.assertEqual(repairs[0]["rule"], "relocated-rule_id+match_text")
         self.assertEqual(refusals, [])
+
+    def test_exact_location_takes_priority_over_relocation_in_either_row_order(self):
+        for relocated_first in (True, False):
+            relocated = {"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal"}
+            exact = {"path": "src/QRPage.js", "line_number": 7}
+            rows = [relocated, exact] if relocated_first else [exact, relocated]
+            repairs, refusals = self.repair(rows)
+            self.assertEqual(exact["candidate_id"], "modal")
+            self.assertNotIn("candidate_id", relocated)
+            self.assertEqual(len(repairs), 1)
+            self.assertIn("uncited presented candidate", refusals[0]["reason"])
+
+    def test_two_presented_candidates_with_same_rule_remain_ambiguous(self):
+        locations = {**self.LOCATIONS, "sibling": {"path": "src/sibling.js", "line": 3,
+                     "rule_id": "legacy-custom-modal"}}
+        rows = [{"path": "src/QRCodeCamera.js", "rule_id": "legacy-custom-modal"}]
+        repairs, refusals = self.repair(rows, locations=locations,
+                                        presented=["modal", "sibling", "other"])
+        self.assertEqual(repairs, [])
+        self.assertNotIn("candidate_id", rows[0])
+        self.assertIn("modal, sibling", refusals[0]["reason"])
 
     def test_repeated_rule_without_exact_evidence_refuses_even_if_one_is_presented(self):
         locations = {**self.LOCATIONS, "unshown": {"path": "src/unshown.js", "line": 4,
