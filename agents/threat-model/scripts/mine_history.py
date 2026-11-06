@@ -69,6 +69,11 @@ SECURITY_KEYWORDS = [
 #   cmd.Start()/cmd.Run() (the same sink is already inventoried at its exec.Command line).
 #   Accepted narrow precision cost of the literal signal: a backtick config path (cfg.Get(`/etc/x`))
 #   can enter the inventory; rare and cheap to triage against the recall it buys.
+# - Socket forwarders bind a literal host/port tuple and then listen; bare `.bind(` would
+#   inventory JavaScript Function.bind, so variable-address binds stay a deliberate gap.
+#   `.listen(` covers both socket backlog and server port calls; non-network listeners
+#   with that method name are a precision cost. Egress matches named client APIs rather
+#   than every `.get(`/`.request(`/`.connect(`; aliased clients remain a gap.
 # - from-import aliases of NON-distinctive names (`from uvicorn import run` + bare `run(...)`,
 #   `from os import system` + bare `system(...)`): the names are too generic to match bare
 #   (agents-a2pke). Distinctive aliases (Popen, check_output, ...) ARE covered - see the
@@ -96,7 +101,9 @@ ENTRY_POINT_PATTERNS = [
         r"""\b(?:app\.(?:get|post|put|delete|use|run)|createServer|new WebSocketServer"""
         r"""|(?:Threading)?HTTPServer|(?:Threading|Forking)?(?:TCP|UDP|UnixStream|UnixDatagram)Server"""
         r"""|socketserver\.\w+Server|make_server|run_app"""
-        r"""|(?:uvicorn|hypercorn|daphne)\.run)\s*\("""
+        r"""|(?:uvicorn|hypercorn|daphne)\.run|asyncio\.start_server"""
+        r"""|net\.Listen(?:TCP|UDP|IP|Unix|UnixPacket|Packet)?|dgram\.createSocket)\s*\("""
+        r"""|\.create_server\s*\(|\.bind\s*\(\s*\(\s*[\"']|\.listen\s*\("""
         r"""|^\s*@(?!(?:unittest\.)?mock\.)[\w.]+\.(?:route|api_route|get|post|put|delete|patch"""
         r"""|head|options|websocket)\s*\("""
         r"""|\bHandleFunc\s*\(|\bListenAndServe(?:TLS)?\s*\(|\bhttp\.Serve\s*\("""
@@ -134,7 +141,18 @@ ENTRY_POINT_PATTERNS = [
         r"""|exec\.Command(?:Context)?|(?:syscall|unix)\.(?:Exec|ForkExec))\s*\("""
     )),
     ("dom-injection", re.compile(r"""\b(?:innerHTML|outerHTML|document\.write|insertAdjacentHTML)\s*=""")),
-    ("external-fetch", re.compile(r"""\b(?:fetch|axios(?:\.get|\.post)?|request\.continue)\s*\(""")),
+    # Named outbound clients and dial sites, not generic receiver methods (cache.get,
+    # client.request, etc.). Request constructors alone are not network operations.
+    ("external-fetch", re.compile(
+        r"""\b(?:fetch|axios(?:\.get|\.post)?|request\.continue"""
+        r"""|socket\.create_connection|http\.client\.HTTP(?:S)?Connection"""
+        r"""|(?:requests|httpx)\.(?:get|post|put|patch|delete|head|options|request)"""
+        r"""|(?:urllib\.request\.)?(?:urlopen|urlretrieve)"""
+        r"""|net\.Dial(?:Timeout|TCP|UDP|IP|Unix)?|https?\.(?:request|get)"""
+        r"""|http\.(?:Get|Post|PostForm|Head)|http\.DefaultClient\.Do"""
+        r"""|net\.(?:connect|createConnection))\s*\("""
+        r"""|\bnew\s+WebSocket\s*\("""
+    )),
 ]
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
