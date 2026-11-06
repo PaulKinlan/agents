@@ -714,6 +714,65 @@ class TestPythonEntryPointShapes(unittest.TestCase):
         self.assertEqual(results, [], f"Python lookalikes are not sinks, got: {results}")
 
 
+class TestSocketAndDialEntryPoints(unittest.TestCase):
+    """Low-level listeners and named outbound clients are inventoried once per line."""
+
+    def _scan(self, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, code in files.items():
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(code, encoding="utf-8")
+            return [(r["path"], r["line_number"], r["category"])
+                    for r in mine_history.scan_entry_points(root)]
+
+    def test_socket_listeners_and_dial_sites(self):
+        results = self._scan({
+            "src/forward.py": (
+                "listener = socket.socket()\n"
+                "listener.bind(('127.0.0.1', port))\n"
+                "listener.listen(128)\n"
+                "peer = socket.create_connection((host, port))\n"
+                "conn = http.client.HTTPSConnection(host)\n"
+                "requests.get(url)\n"
+                "httpx.post(url, json=payload)\n"
+                "urllib.request.urlopen(url)\n"
+                "fetch(url)\n"
+            ),
+            "src/server.go": (
+                "ln, err := net.Listen(\"tcp\", addr)\n"
+                "conn, err := net.DialTimeout(\"tcp\", addr, timeout)\n"
+                "resp, err := http.Get(url)\n"
+                "resp, err = http.DefaultClient.Do(req)\n"
+            ),
+            "src/server.js": (
+                "server.listen(port)\n"
+                "https.request(opts)\n"
+                "net.connect(port)\n"
+                "new WebSocket(url)\n"
+            ),
+        })
+        self.assertEqual(results, [
+            ("src/forward.py", 2, "server-listener"),
+            ("src/forward.py", 3, "server-listener"),
+            *(("src/forward.py", n, "external-fetch") for n in range(4, 10)),
+            ("src/server.go", 1, "server-listener"),
+            *(("src/server.go", n, "external-fetch") for n in range(2, 5)),
+            ("src/server.js", 1, "server-listener"),
+            *(("src/server.js", n, "external-fetch") for n in range(2, 5)),
+        ])
+
+    def test_socket_and_egress_lookalikes_stay_quiet(self):
+        self.assertEqual(self._scan({"src/ordinary.js": (
+            "handler.bind(this)\n"
+            "handler.bind((resolve) => resolve())\n"
+            "cache.get(key)\n"
+            "client.request(opts)\n"
+            "cache.connect(name)\n"
+        )}), [])
+
+
 class TestGoEntryPointShapes(unittest.TestCase):
     """agents-3734h: the entry-point inventory must see Go listeners and spawns.
 
@@ -880,8 +939,8 @@ class TestGoEntryPointShapes(unittest.TestCase):
         """Precision half: ordinary Go must not enter the attack-surface inventory.
 
         The pinned false-positive traps: `cache.Get(key)` (no literal), `viper.GetString("k")`
-        (not the verb method), `http.Get("https://...")` (outbound client fetch - its literal
-        is not a leading-slash route pattern), `env.Get("key", "default")` (config getter with
+        (not the verb method), `http.Get("https://...")` (outbound client fetch, not a route),
+        `env.Get("key", "default")` (config getter with
         a non-path literal), `&cobra.Command{...}` (struct literal, not an exec.Command call)
         and `cmd.Start` (the sink is already inventoried at its exec.Command line).
         agents-8egyo adds the traps for the widened branches: `re.Match("^/api", buf)` (anchor,
@@ -931,7 +990,11 @@ class TestGoEntryPointShapes(unittest.TestCase):
                 "}\n"
             ),
         })
-        self.assertEqual(results, [], f"Go lookalikes are not sinks, got: {results}")
+        self.assertEqual(
+            [(r["path"], r["line_number"], r["category"]) for r in results],
+            [("internal/ordinary/ordinary.go", 6, "external-fetch")],
+            f"Go lookalikes are not listeners/spawns; http.Get is outbound, got: {results}",
+        )
 
 
 class TestSelfTargetRepositoryIdentity(unittest.TestCase):
