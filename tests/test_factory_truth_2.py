@@ -230,9 +230,8 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Target Authoritative TM\nSection 1...\n")
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
-    def test_findings_store_only_threat_model_is_preserved_on_maintenance_run(self):
-        """agents-tawg: when an existing threat model lives only in findings store,
-        a maintenance run that returns summary + findings preserves it and does not overwrite it."""
+    def test_findings_store_only_threat_model_is_replaced_on_new_run(self):
+        """A cached threat model is not authoritative once source architecture changes."""
         target_dir = self.box.target
         for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md"]:
             if cand.exists():
@@ -245,7 +244,10 @@ class TestFieldAliases(SchemaAgentCase):
         self.schema_agent("threat-model", json.dumps(report))
         res = self.box.run_agent("threat-model")
         self.assertEqual(res["report"]["summary"], "Routine maintenance audit")
-        self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Prior Established Threat Model\nStrict Invariants...")
+        updated = store_tm.read_text(encoding="utf-8")
+        self.assertIn("# THREAT MODEL: target (Provisional Bootstrap Baseline)", updated)
+        self.assertNotIn("Prior Established Threat Model", updated)
+        self.assertNotIn("Strict Invariants", updated)
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_bootstrap_without_threat_model_synthesizes_initial_document(self):
