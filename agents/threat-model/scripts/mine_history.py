@@ -756,7 +756,7 @@ def tracked_paths(target_dir: Path) -> Optional[set[str]]:
         return None
     result = subprocess.run(
         [_trusted_git(), "-C", str(target_dir), "ls-files", "--cached", "-z"],
-        capture_output=True, check=False,
+        capture_output=True, check=False, timeout=5,
     )
     if result.returncode:
         raise RuntimeError(f"Cannot list tracked source files in {target_dir}: {result.stderr.decode(errors='replace')}")

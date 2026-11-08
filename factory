@@ -1642,13 +1642,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                     candidates_file, agent_name)
         if agent_name == "threat-model" and subprocess.run(
             ["git", "-C", str(read_dir), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, check=False,
+            capture_output=True, check=False, timeout=5,
         ).returncode == 0:
             # Linked worktrees keep their git index outside the sandbox's read-only
             # target bind. Resolve indexed paths on the host, then pass only names
             # (not git metadata) to the confined pre-pass.
             indexed = subprocess.run(["git", "-C", str(read_dir), "ls-files", "--cached", "-z"],
-                                     capture_output=True, check=False)
+                                     capture_output=True, check=False, timeout=5)
             if indexed.returncode:
                 raise StationError("threat-model: cannot enumerate tracked source files")
             tracked_file = run_dir / "tracked-paths.json"
@@ -3107,7 +3107,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         if (target_dir / ".git").exists():
             candidates = [cand for cand in candidates if subprocess.run(
                 ["git", "-C", str(target_dir), "ls-files", "--error-unmatch", "--", str(cand.relative_to(target_dir))],
-                capture_output=True, check=False,
+                capture_output=True, check=False, timeout=5,
             ).returncode == 0]
         for cand in candidates:
             if cand.exists():
