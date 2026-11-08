@@ -706,6 +706,9 @@ def mine_beads_issues(target_dir: Path, nonce: Optional[str] = None, max_issues:
                 except Exception:
                     continue
 
+                # Factory findings are prior station output, not independent bug history.
+                if str(record.get("external_ref") or "").startswith("factory:"):
+                    continue
                 raw_id = str(record.get("id") or "")
                 title = record.get("title", "")
                 desc = record.get("description", "")
@@ -736,6 +739,28 @@ def mine_beads_issues(target_dir: Path, nonce: Optional[str] = None, max_issues:
         sys.stderr.write(f"Beads mining failed: {e}\n")
 
     return relevant
+
+
+TRACKED_PATHS_OVERRIDE: Optional[set[str]] = None
+
+
+def tracked_paths(target_dir: Path) -> Optional[set[str]]:
+    """Index paths relative to the requested target; non-git directories use a file walk.
+
+    Do not fall back to a file walk when git fails inside a repository: that would
+    silently reintroduce ignored artifacts into the station's evidence.
+    """
+    if TRACKED_PATHS_OVERRIDE is not None:
+        return TRACKED_PATHS_OVERRIDE
+    if _resolve_common_git_dir(target_dir) is None:
+        return None
+    result = subprocess.run(
+        [_trusted_git(), "-C", str(target_dir), "ls-files", "--cached", "-z"],
+        capture_output=True, check=False, timeout=5,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Cannot list tracked source files in {target_dir}: {result.stderr.decode(errors='replace')}")
+    return {os.fsdecode(path) for path in result.stdout.split(b"\0") if path}
 
 
 def scan_entry_points(
@@ -777,6 +802,9 @@ def scan_entry_points(
         reason = "declared" if is_self_target else "declined"
         structural_self = content_self = is_self_target
 
+    # A checkout may retain ignored build output or untracked files from older runs.
+    # In a git repository, only indexed paths are evidence of its current source tree.
+    tracked = tracked_paths(target_dir)
     for root, dirs, files in os.walk(target_dir):
         dirs[:] = [
             d for d in dirs
@@ -794,6 +822,9 @@ def scan_entry_points(
             except ValueError:
                 continue
 
+            # Never mine ignored/untracked artifacts (including stale dist output).
+            if tracked is not None and rel_path not in tracked:
+                continue
             # Exclude tests and fixtures
             if is_test_or_fixture_path(rel_path, fname):
                 continue
@@ -854,7 +885,8 @@ def extract_project_metadata(target_dir: Path, nonce: Optional[str] = None) -> D
     """Extract runtime manifest details (dependencies, scripts) with sanitized text."""
     meta = {}
     pkg_json = target_dir / "package.json"
-    if pkg_json.exists():
+    indexed = tracked_paths(target_dir)
+    if pkg_json.exists() and (indexed is None or "package.json" in indexed):
         try:
             data = json.loads(pkg_json.read_text(encoding="utf-8"))
             meta["name"] = sanitize_untrusted_text(data.get("name"), max_length=60, nonce=nonce)
@@ -868,56 +900,30 @@ def extract_project_metadata(target_dir: Path, nonce: Optional[str] = None) -> D
 
 
 def discover_threat_model(target_dir: Path, output_file: Optional[Path] = None) -> Dict[str, Any]:
-    """Locate existing threat model document in target or findings store without embedding bytes."""
-    target_name = target_dir.name
-    candidates = [
-        target_dir / "THREAT_MODEL.md",
-        target_dir / "docs" / "THREAT_MODEL.md",
-        FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md",
-    ]
-    for c in candidates:
-        if c.exists():
+    """Locate an authoritative document in the current target, never in cached findings."""
+    tracked = tracked_paths(target_dir)
+    for rel in ("THREAT_MODEL.md", "docs/THREAT_MODEL.md"):
+        if tracked is not None and rel not in tracked:
+            continue
+        c = target_dir / rel
+        if c.is_file():
             try:
                 tm_size = c.stat().st_size
-                # If the threat model is inside findings/, copy it to the run dir so sandboxed engine can read it
-                if "findings" in c.parts:
-                    if output_file is not None:
-                        out_tm = output_file.parent / "THREAT_MODEL.md"
-                        out_tm.write_text(c.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-                        out_resolved = str(out_tm.resolve())
-                        return {
-                            "present": True,
-                            "file": out_resolved,
-                            "size_bytes": tm_size,
-                            "note": f"Existing threat model found ({tm_size} bytes in findings store; copied to {out_resolved}). Use read tool to inspect it directly."
-                        }
-                    resolved = str(c.resolve())
-                    return {
-                        "present": True,
-                        "file": resolved,
-                        "size_bytes": tm_size,
-                        "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
-                    }
-                else:
-                    resolved = str(c.resolve())
-                    try:
-                        rel = str(c.relative_to(target_dir))
-                    except ValueError:
-                        rel = resolved
-                    return {
-                        "present": True,
-                        "file": resolved,
-                        "relative_path": rel,
-                        "size_bytes": tm_size,
-                        "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
-                    }
-            except Exception:
+                resolved = str(c.resolve())
+                return {
+                    "present": True,
+                    "file": resolved,
+                    "relative_path": rel,
+                    "size_bytes": tm_size,
+                    "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
+                }
+            except OSError:
                 pass
     return {
         "present": False,
         "file": None,
         "size_bytes": 0,
-        "note": "No existing THREAT_MODEL.md found in target or findings store."
+        "note": "No tracked THREAT_MODEL.md found in target repository. Cached findings are not source evidence."
     }
 
 
@@ -926,6 +932,7 @@ def main():
     parser.add_argument("--target-dir", "--target", dest="target_dir", required=True, help="Target repository directory")
     parser.add_argument("--output", help="Output JSON path")
     parser.add_argument("--nonce", help="Optional explicit nonce (generated securely if omitted)")
+    parser.add_argument("--tracked-paths-file", help="Host-generated indexed paths for sandboxed linked worktrees")
     parser.add_argument("--is-self-target", dest="is_self_target", action="store_true", default=None,
                         help="Explicitly mark target as Software Factory self-target (auto-detected if omitted)")
     parser.add_argument("--no-is-self-target", dest="is_self_target", action="store_false",
@@ -933,6 +940,9 @@ def main():
     args = parser.parse_args()
 
     target_dir = Path(args.target_dir).resolve()
+    if args.tracked_paths_file:
+        global TRACKED_PATHS_OVERRIDE
+        TRACKED_PATHS_OVERRIDE = set(json.loads(Path(args.tracked_paths_file).read_text(encoding="utf-8")))
     if not target_dir.exists():
         sys.stderr.write(f"Target directory not found: {target_dir}\n")
         sys.exit(1)

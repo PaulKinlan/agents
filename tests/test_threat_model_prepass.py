@@ -409,7 +409,8 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             (src_dir / "factory_code.py").write_text(code, encoding="utf-8")
 
             self.assertTrue(mine_history.is_factory_self_target(tmp_path))
-            results, suppressed = mine_history.scan_entry_points(tmp_path, return_suppressed=True)
+            with mock.patch.object(mine_history, "tracked_paths", return_value={"src/factory_code.py"}):
+                results, suppressed = mine_history.scan_entry_points(tmp_path, return_suppressed=True)
             self.assertEqual(len(results), 0, f"Expected self-matches to be suppressed, got: {results}")
             self.assertGreaterEqual(len(suppressed), 2, f"Expected telemetry for suppressed sinks, got: {suppressed}")
             categories = {s["category"] for s in suppressed}
@@ -451,6 +452,7 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
                 '};\n'
             )
             (src_dir / "routes.js").write_text(route_code, encoding="utf-8")
+            subprocess.run(["git", "-C", str(nested_repo), "add", "src/deep/routes.js"], check=True)
 
             # 1. Root of nested foreign repo (agents-760p)
             self.assertFalse(mine_history.is_factory_self_target(nested_repo))
@@ -525,7 +527,8 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             content += "\nel.innerHTML = x;\n"
             (scripts_dir / "mine_history.py").write_text(content, encoding="utf-8")
 
-            results = mine_history.scan_entry_points(tmp_path)
+            with mock.patch.object(mine_history, "tracked_paths", return_value={"agents/threat-model/scripts/mine_history.py"}):
+                results = mine_history.scan_entry_points(tmp_path)
             self.assertEqual(len(results), 0, f"Expected 0 findings due to is_scanner_file exclusion, got: {results}")
 
 
@@ -1128,6 +1131,7 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
         route = clone / "agents" / "product" / "scripts"
         route.mkdir(parents=True)
         (route / "route.py").write_text('handler = app.get("/secret", h)\n', encoding="utf-8")
+        subprocess.run(["git", "-C", str(clone), "add", "agents/product/scripts/route.py"], check=True)
         with self._as_installation(self.factory):
             self.assertEqual(mine_history.factory_self_target_reason(clone),
                              mine_history.SELF_TARGET_SHARED_REPOSITORY)
@@ -1153,6 +1157,7 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
             'handler = {"category": "production", "route": app.get("/secret", h)}\n',
             encoding="utf-8",
         )
+        subprocess.run(["git", "-C", str(clone), "add", "api.py"], check=True)
         with self._as_installation(self.factory):
             self.assertEqual(mine_history.factory_self_target_reason(clone),
                              mine_history.SELF_TARGET_SHARED_REPOSITORY)
@@ -1170,6 +1175,7 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
             'handler = {"category": "production", "route": app.get("/secret", h)}\n',
             encoding="utf-8",
         )
+        subprocess.run(["git", "-C", str(clone), "add", "api.py"], check=True)
         self.assertEqual(mine_history.self_target_suppression_scope("declared"), (True, True))
         self.assertEqual(mine_history.self_target_suppression_scope("declined"), (False, False))
         self.assertEqual(mine_history.self_target_suppression_scope(
@@ -1409,7 +1415,7 @@ class TestDiscoverThreatModel(unittest.TestCase):
             self.assertEqual(info["file"], str(tm_file.resolve()))
             self.assertEqual(info["relative_path"], "docs/THREAT_MODEL.md")
 
-    def test_copies_findings_store_threat_model_to_run_dir(self):
+    def test_ignores_stale_findings_store_threat_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             findings_dir = tmp_path / "findings"
@@ -1429,13 +1435,49 @@ class TestDiscoverThreatModel(unittest.TestCase):
                 out_candidates = out_dir / "candidates.json"
 
                 info = mine_history.discover_threat_model(target_dir, output_file=out_candidates)
-                self.assertTrue(info["present"])
-                copied_file = out_dir / "THREAT_MODEL.md"
-                self.assertEqual(info["file"], str(copied_file.resolve()))
-                self.assertTrue(copied_file.exists())
-                self.assertEqual(copied_file.read_text(encoding="utf-8"), store_tm.read_text(encoding="utf-8"))
+                self.assertFalse(info["present"])
+                self.assertFalse((out_dir / "THREAT_MODEL.md").exists())
+                self.assertEqual(store_tm.read_text(encoding="utf-8"), "# STORED THREAT MODEL\nContent...")
             finally:
                 mine_history.FACTORY_ROOT = orig_root
+
+    def test_git_checkout_only_scans_tracked_current_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            (root / "app.py").write_text("subprocess.run(['current'])\n", encoding="utf-8")
+            (root / "scratch.py").write_text("subprocess.run(['untracked'])\n", encoding="utf-8")
+            dist = root / "dist"
+            dist.mkdir()
+            (dist / "bundle.py").write_text("subprocess.run(['terser'])\n", encoding="utf-8")
+            (root / "THREAT_MODEL.md").write_text("# Old untracked terser model\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", ".gitignore", "app.py"], check=True)
+
+            entries = mine_history.scan_entry_points(root, is_self_target=False)
+            self.assertEqual({e["path"] for e in entries}, {"app.py"})
+            self.assertFalse(mine_history.discover_threat_model(root)["present"])
+            subprocess.run(["git", "-C", str(root), "add", "THREAT_MODEL.md"], check=True)
+            self.assertTrue(mine_history.discover_threat_model(root)["present"])
+
+    def test_host_index_manifest_filters_when_git_dir_is_unavailable_to_prepass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git").write_text("gitdir: /outside/sandbox/git\n", encoding="utf-8")
+            (root / "current.py").write_text("subprocess.run(['current'])\n", encoding="utf-8")
+            (root / "stale.py").write_text("subprocess.run(['terser'])\n", encoding="utf-8")
+            (root / "THREAT_MODEL.md").write_text("# Stale cached model\n", encoding="utf-8")
+            manifest = root / "paths.json"
+            manifest.write_text('["current.py"]', encoding="utf-8")
+            output = root / "out.json"
+            result = subprocess.run([
+                sys.executable, str(ROOT / "agents/threat-model/scripts/mine_history.py"),
+                "--target", str(root), "--output", str(output),
+                "--tracked-paths-file", str(manifest), "--no-is-self-target",
+            ], capture_output=True, text=True, check=True)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual({e["path"] for e in payload["entry_points"]}, {"current.py"}, result.stderr)
+            self.assertFalse(payload["threat_model"]["present"])
 
     def test_absent_when_no_threat_model_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
