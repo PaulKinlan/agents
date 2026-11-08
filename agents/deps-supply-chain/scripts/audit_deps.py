@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -672,6 +673,16 @@ def audit_npm(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
 
     return candidates, manifests
 
+# Only exact, plain index pins may enter pip-audit. pip-audit's default resolver can
+# execute a target-controlled PEP 517 backend while preparing local/VCS/sdist metadata.
+# Even an index pin may resolve to an sdist, so the invocation below disables pip
+# entirely; requirements not represented by these pins are reported as a coverage gap.
+_SAFE_PYTHON_PIN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*\])?"
+    r"==[A-Za-z0-9][A-Za-z0-9.!_+~-]*\Z"
+)
+
+
 def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Inspect requirements.txt and run pip-audit if present."""
     candidates = []
@@ -684,6 +695,7 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     manifests.append("requirements.txt")
 
     # Check for unpinned requirements
+    content = None
     try:
         content = req_path.read_text(encoding="utf-8")
         for line in content.splitlines():
@@ -710,19 +722,56 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     except Exception as e:
         sys.stderr.write(f"Warning reading requirements.txt: {e}\n")
 
+    # Never feed target-controlled pip options, includes, paths or direct references to
+    # pip-audit. Preserve direct exact pins; explicitly disclose skipped requirements
+    # (including unpinned constraints and transitives) instead of claiming full coverage.
+    safe_pins = []
+    skipped = []
+    for line_no, line in enumerate(content.splitlines() if content is not None else [], 1):
+        spec = line.strip()
+        if not spec or spec.startswith("#"):
+            continue
+        if _SAFE_PYTHON_PIN.fullmatch(spec):
+            safe_pins.append(spec)
+        else:
+            # Requirement options may contain private index credentials: never echo them.
+            skipped.append(str(line_no))
+    if content is None:
+        skipped.append("unreadable file")
+    if skipped:
+        candidates.append({
+            "type": "coverage-gap",
+            "rule_id": "pip-audit-requirements-not-audited",
+            "severity": "low",
+            "title": "Some Python requirements were not audited",
+            "description": ("Only plain exact pins can be audited without executing target-controlled "
+                            "build backends. Skipped requirement lines: " + ", ".join(skipped[:20]) +
+                            (f" and {len(skipped) - 20} more" if len(skipped) > 20 else "") +
+                            ". Transitive dependencies are not resolved."),
+            "path": "requirements.txt",
+            "remediation": "Export a fully pinned dependency lockfile and audit it in a trusted environment.",
+        })
+
     # Run pip-audit if installed — pin-authenticated, never PATH order (agents-0qx46)
     pip_audit_bin = _pip_audit_binary()
     if pip_audit_bin:
-        cmd = [pip_audit_bin, "-r", str(req_path), "--format", "json"]
         pip_audit_data = None
         pip_audit_usable = False
         try:
-            # Bounded (agents-09kp3): same pathology as npm audit - a network audit command
-            # without an inner timeout can consume the whole 5-minute station budget.
-            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False,
-                                 timeout=PIP_AUDIT_TIMEOUT_SECONDS)
-            if res.stdout.strip():
-                pip_audit_data = json.loads(res.stdout)
+            if safe_pins:
+                # The temporary file is outside the target and contains no pip directives.
+                # --disable-pip --no-deps prevents even index sdists from running build code.
+                with tempfile.TemporaryDirectory(prefix="factory-pip-audit-") as audit_dir:
+                    safe_path = Path(audit_dir) / "requirements.txt"
+                    safe_path.write_text("\n".join(safe_pins) + "\n", encoding="utf-8")
+                    cmd = [pip_audit_bin, "--disable-pip", "--no-deps", "-r", str(safe_path),
+                           "--format", "json"]
+                    # Bounded (agents-09kp3): preserve a reserve for the station engine.
+                    res = subprocess.run(cmd, cwd=audit_dir, capture_output=True, text=True,
+                                         check=False, timeout=PIP_AUDIT_TIMEOUT_SECONDS)
+                if res.stdout.strip():
+                    pip_audit_data = json.loads(res.stdout)
+            if pip_audit_data is not None:
                 # agents-b9rg0: a RESULT is not merely parseable JSON - it must carry the pip-audit
                 # schema. The npm path guards the shape (`"vulnerabilities" not in raw_audit`) and
                 # this block did not, so an index or proxy answering {"detail": "rate limited"}
@@ -776,8 +825,8 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                 "rule_id": "pip-audit-unavailable",
                 "severity": "low",
                 "title": "Python dependency audit could not run; vulnerability coverage is incomplete",
-                "description": ("`pip-audit` produced no usable result (it timed out, failed, or its "
-                                "output was not the pip-audit JSON schema). Its index may be "
+                "description": ("`pip-audit` produced no usable result (no safe exact pins, "
+                                "timeout, failure, or invalid JSON schema). Its index may be "
                                 "unreachable from this run's egress allowlist, or an index/proxy "
                                 "answered with an error body instead of audit data. No Python "
                                 "vulnerability data was collected for this target."),
