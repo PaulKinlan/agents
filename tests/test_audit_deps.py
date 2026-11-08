@@ -578,6 +578,71 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             self.assertFalse(marker.exists(), "the npm child must not reach its late result")
             self.assertIn("npm-audit-unavailable", [c.get("rule_id") for c in candidates])
 
+    def test_pip_audit_never_resolves_target_authored_requirements(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            original = ("requests==2.25.1\n-e .\nevil @ file:///tmp/evil\n"
+                        "--index-url https://evil.example/simple\n-r other.txt\n"
+                        "django>=4\n./local\n")
+            (repo / "requirements.txt").write_text(original, encoding="utf-8")
+            observed = []
+
+            def fake_run(cmd, **kwargs):
+                source = Path(cmd[cmd.index("-r") + 1])
+                observed.append((cmd, kwargs, source.read_text(encoding="utf-8"), source))
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=json.dumps({"dependencies": [
+                        {"name": "requests", "version": "2.25.1", "vulns": [
+                            {"id": "CVE-TEST", "description": "test", "fix_versions": ["2.31.0"]}]}
+                    ]}), stderr="")
+
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=fake_run):
+                candidates, _ = audit_deps.audit_python(repo)
+            self.assertEqual(len(observed), 1)
+            cmd, kwargs, safe_content, source = observed[0]
+            self.assertEqual(safe_content, "requests==2.25.1\n")
+            self.assertIn("--disable-pip", cmd)
+            self.assertIn("--no-deps", cmd)
+            self.assertNotEqual(source, repo / "requirements.txt")
+            self.assertEqual(Path(kwargs["cwd"]), source.parent)
+            self.assertEqual((repo / "requirements.txt").read_text(encoding="utf-8"), original)
+            self.assertIn("CVE-TEST", [c.get("rule_id") for c in candidates])
+            gaps = [c for c in candidates if c.get("rule_id") == "pip-audit-requirements-not-audited"]
+            self.assertEqual(len(gaps), 1)
+            self.assertIn("2, 3, 4, 5, 6, 7", gaps[0]["description"])
+            self.assertNotIn("evil.example", gaps[0]["description"],
+                             "a private index URL must not leak into finding text")
+
+    def test_plain_pins_are_audited_without_target_options_or_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            pins = "requests==2.25.1\nuvicorn[standard]==0.30.0\n"
+            (repo / "requirements.txt").write_text(pins, encoding="utf-8")
+
+            def fake_run(cmd, **kwargs):
+                self.assertEqual(Path(cmd[cmd.index("-r") + 1]).read_text(), pins)
+                return subprocess.CompletedProcess(cmd, 0, stdout='{"dependencies": []}', stderr="")
+
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=fake_run):
+                candidates, _ = audit_deps.audit_python(repo)
+            self.assertNotIn("pip-audit-requirements-not-audited",
+                             [c.get("rule_id") for c in candidates])
+            self.assertNotIn("pip-audit-unavailable", [c.get("rule_id") for c in candidates])
+
+    def test_no_exact_pins_does_not_invoke_pip_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("-e .\nrequests>=2\n", encoding="utf-8")
+            with mock.patch.object(audit_deps, "_pip_audit_binary", return_value="/fake/pip-audit"), \
+                 mock.patch.object(audit_deps.subprocess, "run") as run:
+                candidates, _ = audit_deps.audit_python(repo)
+            run.assert_not_called()
+            ids = [c.get("rule_id") for c in candidates]
+            self.assertIn("pip-audit-requirements-not-audited", ids)
+            self.assertIn("pip-audit-unavailable", ids)
+
     def test_pip_audit_subprocess_carries_the_inner_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
