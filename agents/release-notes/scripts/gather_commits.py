@@ -165,11 +165,25 @@ def gather_commits(target_dir: Path, since_tag: Optional[str] = None, max_count:
     
     if base_tag:
         git_range = f"{base_tag}..HEAD"
+        # agents-vei8y: base_tag is target-controlled (--since-tag), and an argv token that
+        # begins with '-' in the rev position is parsed as a git OPTION - measured:
+        # `git log "--output=<path>..HEAD" --format=...` wrote the log to a caller-chosen
+        # file outside the target. So the format option comes FIRST and --end-of-options
+        # ends option parsing before the range (git >= 2.24). A plain '--' is the WRONG
+        # separator in this position: after '--' git reads the range as a PATHSPEC and the
+        # log comes back silently empty - the quiet "no commits" result this script refuses
+        # elsewhere. A failed log is LOUD: nonzero exit, stderr names the range.
         cmd = [
-            _trusted_tool("git"), "-C", str(target_dir), "log", git_range,
-            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cI%x1f%s%x1f%b%x1e"
+            _trusted_tool("git"), "-C", str(target_dir), "log",
+            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cI%x1f%s%x1f%b%x1e",
+            "--end-of-options", git_range
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            sys.stderr.write(
+                f"Git log failed for range {git_range!r} (exit {res.returncode}): "
+                f"{res.stderr.strip()}\n")
+            sys.exit(2)
         raw_log = res.stdout
     else:
         git_range = f"HEAD (recent {max_count})"

@@ -32,8 +32,10 @@ fast_gate_arms_090_agents_bundle_size_scripts() {
     agents/release-notes/scripts/gather_commits.py)
       # agents-28nn round 4: gather_commits resolves git through the pin, pinned by
       # tests/test_prepass_pin_boundary.py. tests/test_redaction.py parses every agents/*/scripts/*.py,
-      # and tests/test_docs_drift.py owns the prose.
-      mapped="$mapped tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py"
+      # and tests/test_docs_drift.py owns the prose. tests/test_release_notes_gather.py drives the
+      # real CLI and pins the argv-order contract for the target-controlled --since-tag (agents-vei8y;
+      # measured: 4 tests / ~0.5 s).
+      mapped="$mapped tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py tests/test_release_notes_gather.py"
       ;;
     *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn
   esac

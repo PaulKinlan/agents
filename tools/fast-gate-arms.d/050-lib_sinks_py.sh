@@ -90,7 +90,10 @@ fast_gate_arms_050_lib_sinks_py() {
       # assumed: the unit suite plans/merges/classifies directly (0.07 s, 22 tests), and the e2e
       # drives the real dispatcher with a stub engine (8.0 s, 5 tests) - disabling the bound in
       # `factory` turns it red, so it is not merely an importer.
-      mapped="$mapped tests/test_candidate_batching.py tests/test_candidate_batching_end_to_end.py"
+      # tests/test_audit_a11y.py is also a behavioural consumer (agents-owro1): it asserts the
+      # accessibility pre-pass payload's scanned_files count passes coerce_scanned_files, so a
+      # change to that coercion must re-run it. Measured: 4 tests / ~0.3 s.
+      mapped="$mapped tests/test_candidate_batching.py tests/test_candidate_batching_end_to_end.py tests/test_audit_a11y.py"
       ;;
     lib/credential_broker.py)
       # Credential broker plus end-to-end keyless broker test (agents-vt7w).

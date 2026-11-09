@@ -439,11 +439,16 @@ def main():
     # COPY it rather than reconstruct identity from the model's label and prose.
     assign_candidate_ids(all_candidates)
 
+    # `scanned_files` is an INTEGER COUNT (agents-owro1): the station's own report.schema.json
+    # declares it as {"type": "integer"}, SKILL.md shows the integer shape, and the factory's
+    # pre-pass payload handler (factory -> lib/candidate_batching.coerce_scanned_files) coerces
+    # this key on every run and refuses a list outright. Emitting the path list here made every
+    # `factory run accessibility` die before the engine session with
+    # "scanned_files must be an integer count, not [] (list)".
     result = {
         **artefact_scheme_fields(),
         "target": target_dir.name,
-        "scanned_files_count": len(html_files),
-        "scanned_files": [str(p.relative_to(target_dir)) for p in html_files],
+        "scanned_files": len(html_files),
         "candidate_count": len(all_candidates),
         "candidates": all_candidates
     }
