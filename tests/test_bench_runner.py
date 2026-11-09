@@ -82,6 +82,22 @@ class TestBenchCmd(unittest.TestCase):
         self.assertIsNone(metrics["custom_bench_ms"])
         self.assertLess(elapsed, 30)  # 3 iterations x 0.5s, not 3 x 60s
 
+    def test_timed_out_bench_kills_grandchildren(self):
+        """A descendant must not keep running after the benchmark leader times out."""
+        marker = self.tree / "escaped-grandchild"
+        # The descendant ignores the parent's lifetime and writes after the timeout.
+        # Without a process-group kill all three timed-out samples leave writers behind.
+        child = ("import time; from pathlib import Path; time.sleep(1.5); "
+                 f"Path({str(marker)!r}).write_text('survived')")
+        parent = ("import subprocess, sys, time; "
+                  f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                  "time.sleep(60)")
+        with mock.patch.object(bench_runner, "BENCH_TIMEOUT_SECONDS", 0.2):
+            metrics = measure_target(self.tree, [sys.executable, "-c", parent])
+        self.assertIsNone(metrics["custom_bench_ms"])
+        time.sleep(1.6)
+        self.assertFalse(marker.exists(), "a timed-out bench left a grandchild alive")
+
     def test_failing_bench_cmd_records_no_timing(self):
         """A non-zero exit is a failed sample, not a measurement."""
         metrics = measure_target(self.tree, [sys.executable, "-c", "import sys; sys.exit(1)"])
