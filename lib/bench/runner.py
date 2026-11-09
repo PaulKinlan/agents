@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import shlex
 import subprocess
 import sys
@@ -26,10 +25,12 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
 try:  # imported as lib.bench.runner, or run as a script
+    from lib.budget import _kill_and_reap
     from lib.child_env import child_environment
     from lib.tool_pins import ToolPinError, pin_trusted_argv
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
+    from lib.budget import _kill_and_reap
     from lib.child_env import child_environment
     from lib.tool_pins import ToolPinError, pin_trusted_argv
 
@@ -175,13 +176,9 @@ def measure_target(target_dir: Path, bench_cmd: Optional[List[str]] = None) -> D
                     try:
                         proc.communicate(timeout=BENCH_TIMEOUT_SECONDS)
                     except subprocess.TimeoutExpired:
-                        # The leader may already have exited while a descendant keeps a pipe
-                        # open. Kill its group even in that case, then reap and close the pipes.
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        proc.communicate(timeout=5)
+                        # Reuse the bounded group-kill/drain path: an escaped descendant
+                        # may hold a pipe open even after its old group is gone.
+                        _kill_and_reap(proc)
                         continue
                     returncode = proc.returncode
             except FileNotFoundError:
