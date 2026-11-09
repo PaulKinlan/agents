@@ -405,6 +405,40 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertFalse(any(c["tool"] == "gh" for c in self.calls()))
         self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
 
+    def test_beads_sink_resolves_shared_db_from_linked_worktree(self):
+        """A linked checkout has a .git file; bd must run in the owning checkout."""
+        git = shutil.which("git")
+        self.assertIsNotNone(git)
+        repo = self.root / "canonical"
+        repo.mkdir()
+        subprocess.run([git, "init", "-q", str(repo)], check=True, timeout=10)
+        (repo / ".beads").mkdir()
+        (repo / "tracked").write_text("test", encoding="utf-8")
+        subprocess.run([git, "-C", str(repo), "-c", "user.name=Test",
+                        "-c", "user.email=test@example.invalid", "commit", "-qm", "initial",
+                        "--allow-empty"], check=True, timeout=10)
+        linked = self.root / "linked"
+        subprocess.run([git, "-C", str(repo), "worktree", "add", "-qb", "linked", str(linked)],
+                       check=True, timeout=10)
+        self.target = linked
+        (self.bin / "git").symlink_to(git)
+
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(len(self.state()["beads"]), 1)
+        bd_calls = [call for call in self.calls() if call["tool"] == "bd"]
+        self.assertTrue(bd_calls)
+        self.assertTrue(all(call["cwd"] == str(repo) for call in bd_calls))
+        self.assertTrue(all(call["args"][-2:] == ["-C", str(repo)] for call in bd_calls))
+        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
+        state = self.state()
+        state["beads"][0]["status"] = "closed"
+        self.remote.write_text(json.dumps(state), encoding="utf-8")
+        again = self.scan("beads")
+        self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+        self.assertEqual(self.finding()["post_close_sightings"], 1)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
     def test_fresh_store_dedupes_by_fingerprint(self):
         """agents-eyo: a reset store re-files nothing — the external_ref fingerprint is the guard."""
         self.assertEqual(self.scan("beads").returncode, 0)

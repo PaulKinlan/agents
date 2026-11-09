@@ -32,6 +32,37 @@ _BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
 
 _BEAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+
+def _initialized_beads_project(project: Path) -> Optional[Path]:
+    """Find the shared Beads project for a checkout or linked Git worktree.
+
+    A linked worktree has a .git file, not the canonical checkout's .beads directory.
+    Only the common Git directory's owning checkout is eligible as a fallback; do
+    not search parent directories (which could route findings into another project).
+    """
+    project = Path(project).expanduser().resolve()
+    if not project.is_dir():
+        return None
+    if (project / ".beads").is_dir():
+        return project
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if git.returncode != 0:
+        return None
+    common = Path(git.stdout.strip())
+    if common.name != ".git" or not common.is_dir():
+        return None
+    owner = common.parent.resolve()
+    if owner == project or not (owner / ".beads").is_dir():
+        return None
+    return owner
+
+
 def _bd_json(bd_bin: str, beads_dir: Path, args: List[str]) -> Any:
     """Run one bounded Beads operation in the explicitly configured project DB.
 
@@ -105,16 +136,13 @@ def reconcile_closed_bead_sightings(
     if not findings:
         return None
 
-    if beads_dir is None and target_dir is not None:
-        candidate = Path(target_dir) / ".beads"
-        if candidate.is_dir():
-            beads_dir = Path(target_dir)
-
+    if beads_dir is None:
+        beads_dir = target_dir
     if beads_dir is None:
         return None
 
-    beads_dir = Path(beads_dir).expanduser().resolve()
-    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+    beads_dir = _initialized_beads_project(beads_dir)
+    if beads_dir is None:
         return None
 
     try:
@@ -187,12 +215,13 @@ def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
     if not to_file:
         return result
 
-    beads_dir = beads_dir.expanduser().resolve()
-    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+    project = _initialized_beads_project(beads_dir)
+    if project is None:
         result["failed"] += len(to_file)
         result["note"] = f"no initialized Beads DB in {beads_dir}: nothing filed"
         print(f"Warning: {result['note']}")
         return result
+    beads_dir = project
 
     try:
         bd_bin = resolve_tool("bd")
