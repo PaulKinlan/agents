@@ -439,6 +439,15 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertEqual(self.finding()["post_close_sightings"], 1)
         self.assertEqual(len(self.state()["beads"]), 1)
 
+        forged = self.root / "unregistered"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {repo / '.git'}\n", encoding="utf-8")
+        self.target = forged
+        refused = self.scan("beads", agent="unregistered-lint")
+        self.assertEqual(refused.returncode, 3, refused.stderr + refused.stdout)
+        self.assertIn("no initialized Beads DB", refused.stdout)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
     def test_fresh_store_dedupes_by_fingerprint(self):
         """agents-eyo: a reset store re-files nothing — the external_ref fingerprint is the guard."""
         self.assertEqual(self.scan("beads").returncode, 0)
