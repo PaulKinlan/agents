@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,10 +24,12 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
 try:  # imported as lib.bench.runner, or run as a script
+    from lib.budget import StationBudget, StationTimeout, run_station_command
     from lib.child_env import child_environment
     from lib.tool_pins import ToolPinError, pin_trusted_argv
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
+    from lib.budget import StationBudget, StationTimeout, run_station_command
     from lib.child_env import child_environment
     from lib.tool_pins import ToolPinError, pin_trusted_argv
 
@@ -166,9 +167,15 @@ def measure_target(target_dir: Path, bench_cmd: Optional[List[str]] = None) -> D
         for _ in range(3):
             t0 = time.perf_counter()
             try:
-                res = subprocess.run(bench_cmd, cwd=str(target_dir), capture_output=True,
-                                     text=True, timeout=BENCH_TIMEOUT_SECONDS, env=child_environment())
-            except subprocess.TimeoutExpired:
+                # The shared bounded runner kills the whole session on timeout,
+                # including benchmark grandchildren (agents-go1ua). Its drain remains
+                # bounded even when a descendant escapes the group with an open pipe.
+                res = run_station_command(
+                    bench_cmd, StationBudget(BENCH_TIMEOUT_SECONDS / 60, label="bench"),
+                    "benchmark", cwd=str(target_dir), capture_output=True, text=True,
+                    env=child_environment(), timeout_seconds=BENCH_TIMEOUT_SECONDS,
+                )
+            except StationTimeout:
                 continue
             except FileNotFoundError:
                 sys.stderr.write(f"bench command not found: {bench_cmd[0]}\n")

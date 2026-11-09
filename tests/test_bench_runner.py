@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,57 @@ class TestBenchCmd(unittest.TestCase):
 
         self.assertIsNone(metrics["custom_bench_ms"])
         self.assertLess(elapsed, 30)  # 3 iterations x 0.5s, not 3 x 60s
+
+    def test_timed_out_bench_kills_grandchildren(self):
+        """A descendant must not keep running after the benchmark leader times out."""
+        marker = self.tree / "escaped-grandchild"
+        spawned = self.tree / "spawned-grandchild"
+        # The descendant ignores the parent's lifetime and writes after the timeout.
+        # Without a process-group kill all three timed-out samples leave writers behind.
+        child = ("import time; from pathlib import Path; time.sleep(1.5); "
+                 f"Path({str(marker)!r}).write_text('survived')")
+        parent = ("import subprocess, sys, time; from pathlib import Path; "
+                  f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                  f"Path({str(spawned)!r}).write_text('spawned'); "
+                  "time.sleep(60)")
+        with mock.patch.object(bench_runner, "BENCH_TIMEOUT_SECONDS", 0.2):
+            metrics = measure_target(self.tree, [sys.executable, "-c", parent])
+        self.assertIsNone(metrics["custom_bench_ms"])
+        self.assertTrue(spawned.exists(), "the parent must spawn a descendant before this test can pass")
+        time.sleep(1.6)
+        self.assertFalse(marker.exists(), "a timed-out bench left a grandchild alive")
+
+    def test_escaped_descendant_pipe_does_not_abort_measurement(self):
+        """An out-of-group pipe holder cannot turn a bench timeout into an exception."""
+        from lib import budget
+        pids = self.tree / "escaped-pids"
+        child = "import time; time.sleep(8)"
+        parent = ("import subprocess, sys, time; from pathlib import Path; "
+                  f"child = subprocess.Popen([sys.executable, '-c', {child!r}], "
+                  "start_new_session=True); "
+                  f"Path({str(pids)!r}).open('a').write(str(child.pid) + '\\n'); "
+                  "time.sleep(60)")
+        try:
+            # Exercise real bounded pipe cleanup, without making the fast gate wait for
+            # the production five-second drain three times or for orphaned zombies.
+            # The station runner contains expiry exceptions; elapsed time is the
+            # assertion that distinguishes bounded cleanup from a leaked pipe wait.
+            with mock.patch.object(bench_runner, "BENCH_TIMEOUT_SECONDS", 0.2), \
+                 mock.patch.object(budget, "GROUP_EXIT_WAIT_SECONDS", 0.1), \
+                 mock.patch.object(budget, "_wait_for_group_exit"):
+                start = time.monotonic()
+                metrics = measure_target(self.tree, [sys.executable, "-c", parent])
+                elapsed = time.monotonic() - start
+            self.assertIsNone(metrics["custom_bench_ms"])
+            self.assertTrue(pids.exists(), "the bench must actually spawn an escaped child")
+            self.assertLess(elapsed, 6, "pipe drain exceeded the three-sample timeout budget")
+        finally:
+            if pids.exists():
+                for pid in pids.read_text().splitlines():
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_failing_bench_cmd_records_no_timing(self):
         """A non-zero exit is a failed sample, not a measurement."""
