@@ -17,6 +17,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+sys.path.insert(0, str(ROOT))
+from lib.candidate_batching import coerce_scanned_files  # noqa: E402
+
 
 class TestStdoutChannelDropsTheMatch(unittest.TestCase):
     """Driven through the real CLI with no --output, because the defect was a raw
@@ -53,6 +56,59 @@ class TestStdoutChannelDropsTheMatch(unittest.TestCase):
             self.assertIn("path", candidate)
             self.assertIn("line_number", candidate)
         self.assertIn("stdout redacts matched values", result.stderr)
+
+
+class TestPayloadScannedFilesIsAnIntegerCount(unittest.TestCase):
+    """agents-owro1: the pre-pass payload emitted `scanned_files` as a LIST of paths while the
+    station's own report.schema.json declares {"type": "integer"} and the factory coerces the
+    payload key on EVERY pre-pass run (factory -> lib/candidate_batching.coerce_scanned_files),
+    so every `factory run accessibility` died before the engine session with
+    "scanned_files must be an integer count, not [] (list)".
+
+    Load-bearing: revert main()'s payload to the path list and the first assertion fails naming
+    the list; the coercion assertion names the actual consumer that refused it.
+    """
+
+    def _run_and_read_artefact(self, files):
+        script = ROOT / "agents" / "accessibility" / "scripts" / "audit_a11y.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            for rel, body in files.items():
+                p = target / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+            out = Path(tmp) / "artefact.json"
+            result = subprocess.run(
+                [sys.executable, str(script), "--target", str(target), "--output", str(out)],
+                capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+                env={**os.environ, "PYTHONPATH": str(ROOT)})
+            self.assertEqual(result.returncode, 0, result.stderr[-500:])
+            return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_scanned_files_is_the_integer_count_of_html_files_scanned(self):
+        artefact = self._run_and_read_artefact({
+            "index.html": "<html><body><img src='a.png'></body></html>\n",
+            "about.html": "<html><body>fine</body></html>\n",
+            "notes.md": "# not scanned\n",
+        })
+        # An int, not a list: the exact defect shape the factory's coercion refuses.
+        self.assertIsInstance(artefact["scanned_files"], int,
+                              "payload scanned_files must be a count, not a path list")
+        self.assertEqual(artefact["scanned_files"], 2)
+
+    def test_the_factory_consumer_accepts_the_emitted_value(self):
+        # The consumer that exit-2'd the station: coerce_scanned_files on the real payload.
+        artefact = self._run_and_read_artefact({
+            "index.html": "<html><body><img src='a.png'></body></html>\n",
+        })
+        self.assertEqual(coerce_scanned_files(artefact["scanned_files"]), 1)
+
+    def test_zero_html_files_yields_a_coercible_zero(self):
+        # The observed failure quoted 'not [] (list)': the empty-target shape.
+        artefact = self._run_and_read_artefact({"README.md": "# no html\n"})
+        self.assertEqual(artefact["scanned_files"], 0)
+        self.assertEqual(coerce_scanned_files(artefact["scanned_files"]), 0)
 
 
 if __name__ == "__main__":
