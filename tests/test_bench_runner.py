@@ -115,12 +115,17 @@ class TestBenchCmd(unittest.TestCase):
         try:
             # Exercise real bounded pipe cleanup, without making the fast gate wait for
             # the production five-second drain three times or for orphaned zombies.
+            # The station runner contains expiry exceptions; elapsed time is the
+            # assertion that distinguishes bounded cleanup from a leaked pipe wait.
             with mock.patch.object(bench_runner, "BENCH_TIMEOUT_SECONDS", 0.2), \
                  mock.patch.object(budget, "GROUP_EXIT_WAIT_SECONDS", 0.1), \
                  mock.patch.object(budget, "_wait_for_group_exit"):
+                start = time.monotonic()
                 metrics = measure_target(self.tree, [sys.executable, "-c", parent])
+                elapsed = time.monotonic() - start
             self.assertIsNone(metrics["custom_bench_ms"])
             self.assertTrue(pids.exists(), "the bench must actually spawn an escaped child")
+            self.assertLess(elapsed, 6, "pipe drain exceeded the three-sample timeout budget")
         finally:
             if pids.exists():
                 for pid in pids.read_text().splitlines():
