@@ -19,7 +19,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "agents" / "release-notes" / "scripts" / "gather_commits.py"
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -45,8 +44,13 @@ def _make_repo(tagged: bool) -> Path:
 
 def _run_cli(repo: Path, extra_args, out_name: str):
     out = repo.parent / out_name
+    # The script path is spelled INLINE in this call on purpose: the coverage oracle's
+    # subprocess heuristic reads the literal from inside the run(...) arguments (a module-level
+    # constant is invisible to it and the genuinely-executed relation would report unmapped).
     res = subprocess.run(
-        [sys.executable, str(SCRIPT), "--target", str(repo), "--output", str(out)]
+        [sys.executable,
+         str(ROOT / "agents" / "release-notes" / "scripts" / "gather_commits.py"),
+         "--target", str(repo), "--output", str(out)]
         + list(extra_args),
         capture_output=True, text=True, timeout=120, cwd=str(ROOT),
         env={**os.environ, "PYTHONPATH": str(ROOT)})
