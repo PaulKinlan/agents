@@ -352,9 +352,10 @@ def row_arrays(report: Any) -> Dict[str, List[Dict[str, Any]]]:
 def coerce_scanned_files(value: Any) -> int:
     """Coerce the FACTORY's own scanned-file count, refusing anything that is not one.
 
-    Tolerant of the shapes a pre-pass already emits (an int, or a digit string - the same two forms
-    `lib/report_schema.normalize_report` accepts from a model), strict about everything else: a count
-    that cannot be read is a plumbing error, never a number to invent.
+    Tolerant of the shapes a pre-pass already emits (an int, a digit string - the same two forms
+    `lib/report_schema.normalize_report` accepts from a model - or a list/tuple/set of the scanned
+    paths themselves, whose count is its length; agents-gccdp), strict about everything else: a
+    count that cannot be read is a plumbing error, never a number to invent.
     """
     if isinstance(value, bool):
         raise BatchMergeError(f"scanned_files must be a count, not {value!r} ({type(value).__name__})")
@@ -364,6 +365,11 @@ def coerce_scanned_files(value: Any) -> int:
         return value
     if isinstance(value, str) and value.strip().lstrip("+").isdigit():
         return int(value.strip())
+    if isinstance(value, (list, tuple, set)):
+        # A station that emits the scanned PATHS instead of their count (agents-gccdp): the count
+        # is the length. Generators stay refused - len() would consume them, and the factory
+        # re-reads the payload, so a one-shot iterable is not a count anyone can reuse.
+        return len(value)
     raise BatchMergeError(
         f"scanned_files must be an integer count, not {value!r} ({type(value).__name__})")
 

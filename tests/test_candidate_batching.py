@@ -20,6 +20,7 @@ from lib.candidate_batching import (
     carried_candidate_ids,
     classify_unparseable,
     context_prune_notice,
+    coerce_scanned_files,
     declared_max_candidates_per_call,
     describe_truncation,
     merge_reports,
@@ -249,6 +250,43 @@ class TestMergeReports(unittest.TestCase):
         merged = merge_reports([report([0, 1]), report([2])])
         self.assertEqual(merged["summary"],
                          "Merged 2 bounded batch report(s): 3 row(s) across 3 cited candidate id(s).")
+
+
+class TestCoerceScannedFilesAcceptsPathCollections(unittest.TestCase):
+    """agents-gccdp (coord, lane impl-coerce-list): factory:2032 coerces the pre-pass payload's
+    `scanned_files` on EVERY run, and agents-owro1 fixed only the accessibility PRODUCER - any
+    other station (or stale artefact) emitting a list of scanned paths still died at payload
+    handling with "scanned_files must be an integer count, not [] (list)". The boundary now
+    coerces a list/tuple/set to its length instead of refusing it.
+
+    Load-bearing: delete the collection branch in coerce_scanned_files and every assertion in the
+    first four tests fails naming the collection (BatchMergeError raised), while the generator
+    refusal proves the tolerance is the tight trio the assignment named, not Any-iterable.
+    """
+
+    def test_a_list_of_paths_coerces_to_its_length(self):
+        self.assertEqual(coerce_scanned_files(["index.html", "about.html"]), 2)
+
+    def test_an_empty_list_coerces_to_zero(self):
+        # The exact shape quoted in the agents-owro1 report ('not [] (list)').
+        self.assertEqual(coerce_scanned_files([]), 0)
+
+    def test_tuple_and_set_coerce_to_their_length(self):
+        self.assertEqual(coerce_scanned_files(("index.html",)), 1)
+        self.assertEqual(coerce_scanned_files({"a.html", "b.html", "c.html"}), 3)
+
+    def test_the_collection_count_is_carried_through_merge_reports(self):
+        # The consumer the coercion serves: the factory feeds the payload key straight in
+        # (merge_reports -> coerce_scanned_files -> merged['scanned_files']).
+        merged = merge_reports([report([0])], scanned_files=["x.html", "y.html"])
+        self.assertEqual(merged["scanned_files"], 2)
+
+    def test_a_generator_is_still_refused(self):
+        # Tight on purpose (the assignment names list/tuple/set): len() would consume a generator,
+        # so a one-shot iterable is not a count the factory can re-read from the payload.
+        with self.assertRaises(BatchMergeError) as ctx:
+            coerce_scanned_files(p for p in ["index.html"])
+        self.assertIn("scanned_files", str(ctx.exception))
 
 
 class TestValidateBatchAttribution(unittest.TestCase):
