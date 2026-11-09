@@ -445,8 +445,36 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.target = forged
         refused = self.scan("beads", agent="unregistered-lint")
         self.assertEqual(refused.returncode, 3, refused.stderr + refused.stdout)
-        self.assertIn("no initialized Beads DB", refused.stdout)
+        self.assertIn("not registered as a worktree", refused.stdout)
         self.assertEqual(len(self.state()["beads"]), 1)
+
+        # A PATH-planted git must not run: the verified pin chooses the system
+        # binary even though the planted binary wins the child's PATH order.
+        self.target = linked
+        planted = self.root / "planted-git-ran"
+        fake_git = self.bin / "git"
+        fake_git.unlink()
+        fake_git.write_text(f"#!/bin/sh\necho ran > {str(planted)!r}\nexit 77\n",
+                            encoding="utf-8")
+        fake_git.chmod(0o755)
+        pins = self.root / "verified-pins.yaml"
+        bd_bin = self.bin / "bd"
+        pins.write_text(
+            f"git:\n  path: {git}\n  sha256: {hashlib.sha256(Path(git).read_bytes()).hexdigest()}\n"
+            f"bd:\n  path: {bd_bin}\n  sha256: {hashlib.sha256(bd_bin.read_bytes()).hexdigest()}\n",
+            encoding="utf-8")
+        pinned = self.scan("beads", agent="pinned-lint", extra_env={
+            "FACTORY_VERIFIED_TOOL_PINS": str(pins), "FACTORY_ALLOW_UNPINNED_TOOLS": "",
+        })
+        self.assertEqual(pinned.returncode, 0, pinned.stderr + pinned.stdout)
+        self.assertEqual(len(self.state()["beads"]), 2)
+        self.assertFalse(planted.exists(), "PATH-planted git ran instead of the verified pin")
+
+        fake_git.unlink()
+        missing = self.scan("beads", agent="missing-git-lint")
+        self.assertEqual(missing.returncode, 3, missing.stderr + missing.stdout)
+        self.assertIn("git unavailable or unverified", missing.stdout)
+        self.assertEqual(len(self.state()["beads"]), 2)
 
     def test_fresh_store_dedupes_by_fingerprint(self):
         """agents-eyo: a reset store re-files nothing — the external_ref fingerprint is the guard."""
