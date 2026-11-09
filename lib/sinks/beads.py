@@ -10,6 +10,7 @@ direct call stays safe.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -45,20 +46,36 @@ def _initialized_beads_project(project: Path) -> Optional[Path]:
         return None
     if (project / ".beads").is_dir():
         return project
+    # Git's ambient GIT_DIR/GIT_WORK_TREE could point a target at an unrelated tracker.
+    git_env = {key: value for key, value in os.environ.items()
+               if not key.startswith("GIT_")}
     try:
         git = subprocess.run(
-            ["git", "-C", str(project), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, check=False, timeout=5,
+            ["git", "-C", str(project), "rev-parse", "--show-toplevel",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=5, env=git_env,
+        )
+        lines = git.stdout.splitlines()
+        if git.returncode != 0 or len(lines) != 2 or Path(lines[0]).resolve() != project:
+            return None
+        common = Path(lines[1])
+        if common.name != ".git" or not common.is_dir():
+            return None
+        owner = common.parent.resolve()
+        if owner == project or not (owner / ".beads").is_dir():
+            return None
+        # A forged .git file can name another repository's common directory. Only
+        # registered linked worktrees may publish into that repository's Beads DB.
+        registered = subprocess.run(
+            ["git", "--git-dir", str(common), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, timeout=5, env=git_env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if git.returncode != 0:
-        return None
-    common = Path(git.stdout.strip())
-    if common.name != ".git" or not common.is_dir():
-        return None
-    owner = common.parent.resolve()
-    if owner == project or not (owner / ".beads").is_dir():
+    if registered.returncode != 0 or not any(
+        line.startswith("worktree ") and Path(line[9:]).resolve() == project
+        for line in registered.stdout.splitlines()
+    ):
         return None
     return owner
 

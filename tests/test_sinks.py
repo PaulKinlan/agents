@@ -411,15 +411,15 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertIsNotNone(git)
         repo = self.root / "canonical"
         repo.mkdir()
-        subprocess.run([git, "init", "-q", str(repo)], check=True, timeout=10)
+        subprocess.run([git, "init", "-q", str(repo)], check=True, timeout=_CLI_GUARD_S)
         (repo / ".beads").mkdir()
         (repo / "tracked").write_text("test", encoding="utf-8")
         subprocess.run([git, "-C", str(repo), "-c", "user.name=Test",
                         "-c", "user.email=test@example.invalid", "commit", "-qm", "initial",
-                        "--allow-empty"], check=True, timeout=10)
+                        "--allow-empty"], check=True, timeout=_CLI_GUARD_S)
         linked = self.root / "linked"
         subprocess.run([git, "-C", str(repo), "worktree", "add", "-qb", "linked", str(linked)],
-                       check=True, timeout=10)
+                       check=True, timeout=_CLI_GUARD_S)
         self.target = linked
         (self.bin / "git").symlink_to(git)
 
