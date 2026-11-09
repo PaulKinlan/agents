@@ -10,6 +10,7 @@ direct call stays safe.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +32,59 @@ _BEAD_EXTERNAL_REF_RE = re.compile(
 _BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
 
 _BEAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _initialized_beads_project(project: Path) -> tuple[Optional[Path], str]:
+    """Find the shared Beads project for a checkout or linked Git worktree.
+
+    A linked worktree has a .git file, not the canonical checkout's .beads directory.
+    Only the common Git directory's owning checkout is eligible as a fallback; do
+    not search parent directories (which could route findings into another project).
+    """
+    project = Path(project).expanduser().resolve()
+    if not project.is_dir():
+        return None, "project path is not a directory"
+    if (project / ".beads").is_dir():
+        return project, ""
+    # Git's ambient GIT_DIR/GIT_WORK_TREE could point a target at an unrelated tracker.
+    git_env = {key: value for key, value in os.environ.items()
+               if not key.startswith("GIT_")}
+    try:
+        git_bin = resolve_tool("git")
+    except ToolPinError as exc:
+        return None, f"git unavailable or unverified: {exc}"
+    try:
+        git = subprocess.run(
+            [git_bin, "-C", str(project), "rev-parse", "--show-toplevel",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=5, env=git_env,
+        )
+        lines = git.stdout.splitlines()
+        if git.returncode != 0 or len(lines) != 2 or Path(lines[0]).resolve() != project:
+            return None, "git could not identify the worktree root and common directory"
+        common = Path(lines[1])
+        if common.name != ".git" or not common.is_dir():
+            return None, "git common directory does not belong to a checkout"
+        owner = common.parent.resolve()
+        if owner == project or not (owner / ".beads").is_dir():
+            return None, f"common-directory owner {owner} has no initialized Beads DB"
+        # A forged .git file can name another repository's common directory. Only
+        # registered linked worktrees may publish into that repository's Beads DB.
+        registered = subprocess.run(
+            [git_bin, "--git-dir", str(common), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, timeout=5, env=git_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"git worktree probe could not run ({type(exc).__name__})"
+    if registered.returncode != 0:
+        return None, "git could not list registered worktrees"
+    if not any(
+        line.startswith("worktree ") and Path(line[9:]).resolve() == project
+        for line in registered.stdout.splitlines()
+    ):
+        return None, f"{project} is not registered as a worktree of {owner}"
+    return owner, ""
+
 
 def _bd_json(bd_bin: str, beads_dir: Path, args: List[str]) -> Any:
     """Run one bounded Beads operation in the explicitly configured project DB.
@@ -105,17 +159,14 @@ def reconcile_closed_bead_sightings(
     if not findings:
         return None
 
-    if beads_dir is None and target_dir is not None:
-        candidate = Path(target_dir) / ".beads"
-        if candidate.is_dir():
-            beads_dir = Path(target_dir)
-
+    if beads_dir is None:
+        beads_dir = target_dir
     if beads_dir is None:
         return None
 
-    beads_dir = Path(beads_dir).expanduser().resolve()
-    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
-        return None
+    beads_dir, reason = _initialized_beads_project(beads_dir)
+    if beads_dir is None:
+        return reason
 
     try:
         from lib.tool_pins import ToolPinError, resolve_tool
@@ -187,12 +238,13 @@ def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
     if not to_file:
         return result
 
-    beads_dir = beads_dir.expanduser().resolve()
-    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+    project, reason = _initialized_beads_project(beads_dir)
+    if project is None:
         result["failed"] += len(to_file)
-        result["note"] = f"no initialized Beads DB in {beads_dir}: nothing filed"
+        result["note"] = f"Beads DB for {beads_dir} unavailable ({reason}): nothing filed"
         print(f"Warning: {result['note']}")
         return result
+    beads_dir = project
 
     try:
         bd_bin = resolve_tool("bd")
