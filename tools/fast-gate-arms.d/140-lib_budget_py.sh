@@ -25,7 +25,9 @@ fast_gate_arms_140_lib_budget_py() {
       # only the three suites above - the same half-mapped shape agents-4ic0 fixed for
       # lib/adapters/pi.sh. Measured cost of the addition: 8.3 s (14 tests), against a 61 s
       # run for this arm's current union.
-      mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py tests/test_line_andon.py"
+      # agents-go1ua: bench samples now call run_station_command; its timeout and
+      # process-group regression tests are consumers of this cleanup contract.
+      mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py tests/test_line_andon.py tests/test_bench_runner.py"
       ;;
     lib/containment.py)
       # agents-mo75. The generic lib/*.py arm below derives the suite from the changed file's
