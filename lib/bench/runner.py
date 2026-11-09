@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,12 +24,12 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
 try:  # imported as lib.bench.runner, or run as a script
-    from lib.budget import _kill_and_reap
+    from lib.budget import StationBudget, StationTimeout, run_station_command
     from lib.child_env import child_environment
     from lib.tool_pins import ToolPinError, pin_trusted_argv
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
-    from lib.budget import _kill_and_reap
+    from lib.budget import StationBudget, StationTimeout, run_station_command
     from lib.child_env import child_environment
     from lib.tool_pins import ToolPinError, pin_trusted_argv
 
@@ -168,24 +167,21 @@ def measure_target(target_dir: Path, bench_cmd: Optional[List[str]] = None) -> D
         for _ in range(3):
             t0 = time.perf_counter()
             try:
-                # Give each sample its own group: subprocess.run kills only the direct
-                # child on timeout and leaves benchmark grandchildren alive (agents-go1ua).
-                with subprocess.Popen(bench_cmd, cwd=str(target_dir), stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, text=True, env=child_environment(),
-                                      start_new_session=True) as proc:
-                    try:
-                        proc.communicate(timeout=BENCH_TIMEOUT_SECONDS)
-                    except subprocess.TimeoutExpired:
-                        # Reuse the bounded group-kill/drain path: an escaped descendant
-                        # may hold a pipe open even after its old group is gone.
-                        _kill_and_reap(proc)
-                        continue
-                    returncode = proc.returncode
+                # The shared bounded runner kills the whole session on timeout,
+                # including benchmark grandchildren (agents-go1ua). Its drain remains
+                # bounded even when a descendant escapes the group with an open pipe.
+                res = run_station_command(
+                    bench_cmd, StationBudget(BENCH_TIMEOUT_SECONDS / 60, label="bench"),
+                    "benchmark", cwd=str(target_dir), capture_output=True, text=True,
+                    env=child_environment(), timeout_seconds=BENCH_TIMEOUT_SECONDS,
+                )
+            except StationTimeout:
+                continue
             except FileNotFoundError:
                 sys.stderr.write(f"bench command not found: {bench_cmd[0]}\n")
                 break  # a missing binary fails all three runs the same way
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            if returncode == 0:
+            if res.returncode == 0:
                 timings.append(elapsed_ms)
         if timings:
             timings.sort()
