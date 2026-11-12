@@ -592,3 +592,16 @@ e8aeedd24594a055b962f7870755f96342c35d9ea0a837fc341b5a5c07350d38:
   reason: "generic-api-key match at tests/security_audit_test.ts:471 - SECRET_AUDIO_TOKEN = 'private-audio-token-123456789' exists so the test asserts the 404 redaction on /audio/:key (audio-feed-0eae); assertion subject, not a credential. Read and confirmed. (audio-feed-imp-25)"
   author: "audio-feed-imp-25"
   date: "2026-10-26"
+
+e0a7295c304e4e69e6b887840f06af55731ffbbecf61adb9301ed425382044b1:
+  reason: "modern-web headings-missing-text-wrap-balance-or-pretty at static/css/material.css:10 - measured false positive. The row audits SOURCE, but the built palette page serves css/bundle.css which concatenates open-props carrying :where(h1..h6){text-wrap:balance}. Disposition bead paul-kinlan-me-vz63."
+  author: "paul-kinlan-me-sweep-nov12"
+  date: "2026-11-12"
+680524f397422c65b9999722a1440bd0b0ddcf35c5cd6075f67f4065a81262a1:
+  reason: "threat-model tm-csp-unsafe-inline-script at vercel.json:134 - ACCEPTED RISK, not a gap. Site-wide script-src 'unsafe-inline' retained deliberately. Recorded in target THREAT_MODEL.md Section 7. Deciding bead paul-kinlan-me-qz62; disposition bead paul-kinlan-me-lsus."
+  author: "paul-kinlan-me-sweep-nov12"
+  date: "2026-11-12"
+78dcaf71a36a58dfe0e333c02612535c203c20c17074fc41dde7eb0e39905dcd:
+  reason: "threat-model tm-unsafe-inline-csp at vercel.json:134 - alternate wording for 680524f39742. Recorded in target THREAT_MODEL.md Section 7 and bead paul-kinlan-me-lsus (deciding bead paul-kinlan-me-qz62)."
+  author: "paul-kinlan-me-sweep-nov12"
+  date: "2026-11-12"
