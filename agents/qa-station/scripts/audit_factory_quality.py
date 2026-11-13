@@ -23,6 +23,7 @@ from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields 
 from lib.redaction import emit_station_result  # noqa: E402
 AGENTS_DIR = FACTORY_ROOT / "agents"
 FINDINGS_DIR = FACTORY_ROOT / "findings"
+VALID_STATES = frozenset(("new", "accepted", "wontfix", "fixed", "regressed"))
 
 
 def audit_agent_contracts() -> List[Dict[str, Any]]:
@@ -77,17 +78,34 @@ def audit_findings_precision() -> Dict[str, Any]:
             if not (isinstance(store, dict) and isinstance(store.get("findings"), dict)):
                 continue
             stores_read.append(fpath.name)
-
+            invalid_states = 0
             for item in store["findings"].values():
                 if not isinstance(item, dict):
                     continue
+                # `state` is authoritative; support a legacy `status` only when state
+                # is absent. Never treat a malformed value as new or use an untrusted
+                # string as a scorecard key (or confuse a corrupted store with precision).
+                status = item.get("state", item.get("status"))
+                if not isinstance(status, str) or status not in VALID_STATES:
+                    invalid_states += 1
+                    continue
                 ag = item.get("agent", "unknown")
-                status = item.get("state") or item.get("status") or "new"
                 st = agent_stats[ag]
                 st["total_findings"] += 1
-                st[status] = st.get(status, 0) + 1
+                st[status] += 1
                 if not item.get("remediation"):
                     st["missing_remediation"] += 1
+            if invalid_states:
+                noisy_candidates.append({
+                    "rule_id": "qa-invalid-findings-state",
+                    "agent": "qa-station",
+                    "path": f"findings/{fpath.name}",
+                    "severity": "medium",
+                    "title": f"Findings store has {invalid_states} invalid lifecycle state(s)",
+                    "rationale": ("Exclude malformed records from precision estimates and repair their "
+                                  "state/status to one of new, accepted, wontfix, fixed, regressed "
+                                  "after verifying the real disposition."),
+                })
 
     scorecards = []
     for ag, st in sorted(agent_stats.items()):
