@@ -3,6 +3,11 @@
     "tests/test_docs_drift.py",
     "tests/test_prepass_truth.py"
   ],
+  "agents/qa-station/scripts/audit_factory_quality.py": [
+    "tests/test_prepass_truth.py",
+    "tests/test_factory_truth_2.py",
+    "tests/test_candidate_id_emission.py"
+  ],
   "lib/child_env.py": [
     "tests/test_promotion.py"
   ],
