@@ -2104,17 +2104,24 @@ def repair_cited_candidate_ids(rows: Any,
                            if isinstance(location, dict) and location.get("path")}
     repairs: List[Dict[str, Any]] = []
     # A citation whose pre-pass file contradicts the row's file must not reserve that candidate.
-    # Keep unknown paths/ids untouched: only the scanner's own mapping can establish a conflict.
+    # Keep unknown paths/ids and sibling-batch ids untouched. Duplicated ids stay with the
+    # existing duplicate-by-path repair, which preserves its audit rule and refusal semantics.
     mismatched = {}
     if candidate_locations and isinstance(rows, list):
+        own_ids = {cid for cid in presented if isinstance(cid, str)}
+        own_paths = {_normalise_cited_path(candidate_locations[cid].get("path"))
+                     for cid in own_ids if isinstance(candidate_locations.get(cid), dict)}
+        citations = _rows_by_cited_id(row for row in rows if isinstance(row, dict))
         for row in rows:
             if not isinstance(row, dict):
                 continue
             cid = row.get("candidate_id")
             path = _normalise_cited_path(row.get("path"))
             location = candidate_locations.get(cid) if isinstance(cid, str) else None
-            if (path and isinstance(location, dict) and location.get("path")
-                    and path != _normalise_cited_path(location["path"])):
+            if (isinstance(cid, str) and cid in own_ids and path in own_paths
+                    and isinstance(location, dict)
+                    and location.get("path") and path != _normalise_cited_path(location["path"])
+                    and len(citations.get(cid, ())) == 1):
                 mismatched[id(row)] = (row, cid, location["path"])
                 row.pop("candidate_id")
     for row in rows if isinstance(rows, list) else ():
