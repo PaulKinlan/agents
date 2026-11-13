@@ -94,10 +94,16 @@ def audit_findings_precision() -> Dict[str, Any]:
         total = max(1, st["total_findings"])
         wontfix_rate = round(st["wontfix"] / total, 3)
         precision_est = round(1.0 - wontfix_rate, 3)
+        # agents-e3jru: missing_remediation was counted but never DERIVED - the scorecard carried a raw
+        # count the SKILL.md tells the model to review, with no rate and no candidate rule, so an agent
+        # whose findings systematically lack a remediation never surfaced the way a high wontfix rate
+        # does. Same shape, same thresholds: a rate over the same 30% line, on the same >=3 floor.
+        missing_remediation_rate = round(st["missing_remediation"] / total, 3)
         scorecards.append({
             "agent": ag,
             **st,
             "wontfix_rate": wontfix_rate,
+            "missing_remediation_rate": missing_remediation_rate,
             "estimated_precision": precision_est
         })
         if wontfix_rate > 0.30 and st["total_findings"] >= 3:
@@ -108,6 +114,17 @@ def audit_findings_precision() -> Dict[str, Any]:
                 "severity": "medium",
                 "title": f"Agent '{ag}' Exceeds 30% Wontfix Threshold ({wontfix_rate * 100:.1f}%)",
                 "rationale": "High wontfix ratio indicates false-positive creep; tighten deterministic pre-pass filters or SKILL.md triage rules."
+            })
+        if missing_remediation_rate > 0.30 and st["total_findings"] >= 3:
+            noisy_candidates.append({
+                "rule_id": "qa-agent-remediation-gap",
+                "agent": ag,
+                "path": f"agents/{ag}/SKILL.md",
+                "severity": "medium",
+                "title": (f"Agent '{ag}' omits remediation on {st['missing_remediation']} of "
+                          f"{st['total_findings']} findings ({missing_remediation_rate * 100:.1f}%)"),
+                "rationale": ("Findings without remediation hand a human a problem with no next step; "
+                              "the SKILL.md output contract must require an actionable remediation per finding.")
             })
 
     if not agent_stats:

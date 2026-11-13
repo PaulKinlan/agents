@@ -15,7 +15,14 @@
         "properties": {
           "agent": { "type": "string" },
           "total_findings": { "type": "integer" },
+          "new": { "type": "integer", "description": "Findings lifecycle count for state 'new' as recorded in the findings store." },
+          "accepted": { "type": "integer", "description": "Findings lifecycle count for state 'accepted' as recorded in the findings store." },
+          "wontfix": { "type": "integer", "description": "Findings lifecycle count for state 'wontfix' as recorded in the findings store." },
+          "fixed": { "type": "integer", "description": "Findings lifecycle count for state 'fixed' as recorded in the findings store." },
+          "regressed": { "type": "integer", "description": "Findings lifecycle count for state 'regressed' as recorded in the findings store." },
+          "missing_remediation": { "type": "integer", "description": "Findings with no remediation text (agents-xoxum)." },
           "wontfix_rate": { "type": "number" },
+          "missing_remediation_rate": { "type": "number", "description": "missing_remediation / total_findings, 3dp (agents-e3jru). Over 30% on >=3 findings this surfaces as the qa-agent-remediation-gap candidate." },
           "estimated_precision": { "type": "number" }
         }
       }
