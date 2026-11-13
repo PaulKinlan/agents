@@ -2086,6 +2086,64 @@ class TestADuplicatedCitationIsNamedAndRepairedByPath(unittest.TestCase):
             self.assertEqual(findings.read_candidate_paths(run), {})
 
 
+class TestCandidateIdPathConsistency(unittest.TestCase):
+    def test_wrong_file_id_cannot_reserve_the_candidate_needed_by_another_row(self):
+        locations = {
+            "index": {"path": "index.html", "line": 8},
+            "css": {"path": "QRCodeAboutDialog.css", "line": 12},
+        }
+        rows = [
+            {"candidate_id": "index", "path": "QRCodeAboutDialog.css", "line_number": 12},
+            {"path": "index.html", "line_number": 8},
+        ]
+        repairs = repair_cited_candidate_ids(rows, list(locations), candidate_locations=locations)
+        self.assertEqual([row.get("candidate_id") for row in rows], ["css", "index"])
+        self.assertEqual(repairs[0]["rule"], "path-consistency+path+line")
+        self.assertEqual(repairs[0]["cited"], "index")
+        self.assertTrue(candidate_coverage(2, 2, presented_ids=list(locations),
+                                           cited_ids=[row["candidate_id"] for row in rows])["complete"])
+
+    def test_mismatch_without_unique_location_is_never_counted_as_valid(self):
+        locations = {
+            "index": {"path": "index.html", "line": 8},
+            "css-a": {"path": "dialog.css", "line": 12},
+            "css-b": {"path": "dialog.css", "line": 12},
+        }
+        rows = [{"candidate_id": "index", "path": "dialog.css", "line_number": 12}]
+        refusals = []
+        self.assertEqual(repair_cited_candidate_ids(rows, list(locations),
+                                                     candidate_locations=locations,
+                                                     refusals=refusals), [])
+        self.assertNotIn("candidate_id", rows[0])
+        self.assertTrue(any("candidate_id belongs to 'index.html'" in r["reason"]
+                            for r in refusals))
+
+    def test_swapped_ids_are_repaired_even_when_id_only_coverage_would_pass(self):
+        locations = {"index": {"path": "index.html", "line": 8},
+                     "css": {"path": "dialog.css", "line": 12}}
+        rows = [{"candidate_id": "css", "path": "index.html", "line_number": 8},
+                {"candidate_id": "index", "path": "dialog.css", "line_number": 12}]
+        repairs = repair_cited_candidate_ids(rows, list(locations), candidate_locations=locations)
+        self.assertEqual([row["candidate_id"] for row in rows], ["index", "css"])
+        self.assertEqual(len(repairs), 2)
+        self.assertEqual({record["rule"] for record in repairs}, {"path-consistency+path+line"})
+
+    def test_matching_and_normalized_paths_keep_their_original_ids(self):
+        locations = {"index": {"path": "docs/index.html", "line": 8}}
+        rows = [{"candidate_id": "index", "path": "./docs/index.html"}]
+        refusals = []
+        self.assertEqual(repair_cited_candidate_ids(rows, ["index"],
+                                                     candidate_locations=locations,
+                                                     refusals=refusals), [])
+        self.assertEqual(rows[0]["candidate_id"], "index")
+        self.assertEqual(refusals, [])
+
+    def test_missing_path_evidence_does_not_invalidate_an_id(self):
+        rows = [{"candidate_id": "index", "path": "dialog.css"}]
+        self.assertEqual(repair_cited_candidate_ids(rows, ["index"], candidate_locations={}), [])
+        self.assertEqual(rows[0]["candidate_id"], "index")
+
+
 class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):
     """The four conditions that must ALL hold before a duplicated citation is re-bound (agents-amgst)."""
 
