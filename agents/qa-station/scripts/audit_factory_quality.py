@@ -206,14 +206,20 @@ def audit_findings_precision() -> Dict[str, Any]:
     # (journal-wog). A broken store is partial evidence, not a silent exclusion.
     if FINDINGS_DIR.exists():
         for fpath in sorted(FINDINGS_DIR.glob("*.json")):
-            # The line runner writes a different JSON contract beside the stores.
-            # It has no `findings` map by design, so it is not a corrupt store.
-            if fpath.name.endswith(("-line.json", "-bundle-baseline.json")):
-                continue
             try:
                 store = json.loads(fpath.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
+            except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
                 store = None
+            # Both the line runner and bundle-size write machine reports beside stores.
+            # A suffix alone is not proof: command-line.json may be a REAL store for a
+            # target named command-line. Check the parsed sidecar contract first, and
+            # never silently skip an unreadable file with a sidecar-looking name.
+            if isinstance(store, dict) and "findings" not in store:
+                if fpath.name.endswith("-line.json") and {"line", "stations", "stats", "complete"} <= store.keys():
+                    continue
+                if (fpath.name.endswith("-bundle-baseline.json") and
+                        {"recorded_at", "total_raw_bytes", "total_gzip_bytes", "asset_count", "largest_assets"} <= store.keys()):
+                    continue
             if not (isinstance(store, dict) and isinstance(store.get("findings"), dict)):
                 noisy_candidates.append({
                     "rule_id": "qa-unreadable-findings-store",

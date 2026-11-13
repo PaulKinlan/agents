@@ -226,10 +226,14 @@ class TestPrepassFixes(unittest.TestCase):
             directory = Path(tmp)
             (directory / "broken.json").write_text('{"findings": {', encoding="utf-8")
             (directory / "wrong-shape.json").write_text('{"findings": []}', encoding="utf-8")
-            (directory / "good-line.json").write_text('{"complete": true, "stations": []}',
-                                                       encoding="utf-8")
-            (directory / "good-bundle-baseline.json").write_text(
-                '{"target": "good", "total_gzip_bytes": 900, "asset_count": 3}', encoding="utf-8")
+            (directory / "good-line.json").write_text(json.dumps({
+                "line": "daily", "stations": [], "stats": {}, "complete": True,
+            }), encoding="utf-8")
+            (directory / "good-bundle-baseline.json").write_text(json.dumps({
+                "target": "good", "recorded_at": "2026-01-01T00:00:00Z",
+                "total_raw_bytes": 2000, "total_gzip_bytes": 900, "asset_count": 3,
+                "largest_assets": [],
+            }), encoding="utf-8")
             (directory / "good.json").write_text(json.dumps({"findings": {
                 "valid": {"agent": "lint", "state": "accepted"},
             }}), encoding="utf-8")
@@ -242,6 +246,48 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual({c["path"] for c in unreadable},
                              {"findings/broken.json", "findings/wrong-shape.json"})
             self.assertTrue(all(c["severity"] == "medium" for c in unreadable))
+
+    def test_qa_station_identifies_sidecars_by_contract_not_suffix_alone(self):
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_sidecar_shape", str(script))
+        spec = importlib.util.spec_from_loader("qa_sidecar_shape", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name in ("command-line.json", "my-bundle-baseline.json"):
+                (directory / name).write_text(json.dumps({"target": name[:-5], "findings": {
+                    "f": {"agent": "lint", "state": "accepted", "remediation": "fix"},
+                }}), encoding="utf-8")
+            (directory / "broken-line.json").write_text('{"findings": {', encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", directory):
+                data = qa.audit_findings_precision()
+            self.assertEqual(data["stores_read"], ["command-line.json", "my-bundle-baseline.json"])
+            self.assertEqual(data["agent_scorecards"][0]["total_findings"], 2)
+            self.assertEqual([(c["rule_id"], c["path"]) for c in data["noisy_candidates"]],
+                             [("qa-unreadable-findings-store", "findings/broken-line.json")])
+
+    def test_qa_station_quarantines_deep_json_without_aborting_valid_store(self):
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_deep_store", str(script))
+        spec = importlib.util.spec_from_loader("qa_deep_store", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            depth = sys.getrecursionlimit() + 50
+            (directory / "deep.json").write_text("[" * depth + "0" + "]" * depth,
+                                                 encoding="utf-8")
+            (directory / "good.json").write_text(json.dumps({"findings": {
+                "valid": {"agent": "lint", "state": "accepted"},
+            }}), encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", directory):
+                data = qa.audit_findings_precision()
+            self.assertEqual(data["stores_read"], ["good.json"])
+            self.assertEqual(data["agent_scorecards"][0]["total_findings"], 1)
+            unreadable, = [c for c in data["noisy_candidates"]
+                           if c["rule_id"] == "qa-unreadable-findings-store"]
+            self.assertEqual(unreadable["path"], "findings/deep.json")
 
     def test_qa_station_quarantines_non_string_agents_and_keeps_other_rows(self):
         script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
