@@ -2102,7 +2102,7 @@ class TestADuplicatedCitationIsNamedAndRepairedByPath(unittest.TestCase):
         aggregate_refusals = [r for r in refusals if "aggregate coverage fields claim" in r.get("reason", "")]
         self.assertEqual(len(aggregate_refusals), 1, refusals)
         self.assertEqual(aggregate_refusals[0]["cited"], "index")
-        self.assertIn("names 'css'", aggregate_refusals[0]["reason"])
+        self.assertIn("does not name 'css'", aggregate_refusals[0]["reason"])
         self.assertTrue(any("duplicated citation" in r.get("reason", "") for r in refusals),
                         "the surviving duplicate still reports its accounting consequence")
 
@@ -2203,7 +2203,8 @@ class TestCandidateIdPathConsistency(unittest.TestCase):
                 self.assertEqual(rows[0]["covered_candidate_ids"], ["index"])
                 self.assertEqual(rows[0]["anchor_candidate_id"], "index")
                 self.assertEqual(len(refusals), 1, refusals)
-                self.assertIn("aggregate coverage fields claim 'index'", refusals[0]["reason"])
+                self.assertIn("aggregate coverage fields claim ['index']", refusals[0]["reason"])
+                self.assertIn("does not name 'css'", refusals[0]["reason"])
                 self.assertIn("belongs to 'index.html'", refusals[0]["reason"])
 
     def test_an_anchor_only_aggregate_row_contradicting_its_path_is_refused(self):
@@ -2232,6 +2233,65 @@ class TestCandidateIdPathConsistency(unittest.TestCase):
         self.assertEqual(rows[0]["covered_candidate_ids"], ["css"], "claim untouched")
         self.assertEqual(repairs[0]["cited"], "index")
         self.assertEqual(repairs[0]["rule"], "path-consistency+path+line")
+
+    def test_a_claim_naming_a_third_candidate_is_refused_even_though_it_names_the_popped_id_no(self):
+        """agents-zvdnb: the claim must name the id the row ENDS UP citing, not the popped one.
+        covered=[img] names neither the popped index nor the re-bind target css, so the old
+        popped-id guard let this through silently (the validator never cross-checked); now it
+        is refused untouched."""
+        rows = [{"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+                 "covered_candidate_ids": ["img"], "anchor_candidate_id": "img"}]
+        refusals = []
+        repairs = repair_cited_candidate_ids(rows, list(self.LOCATIONS),
+                                             candidate_locations=self.LOCATIONS,
+                                             refusals=refusals)
+        self.assertEqual(repairs, [])
+        self.assertEqual(rows[0]["candidate_id"], "index", "untouched - the conflict stays visible")
+        self.assertEqual(rows[0]["covered_candidate_ids"], ["img"])
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("does not name 'css'", refusals[0]["reason"])
+
+    def test_a_claim_naming_both_the_popped_id_and_the_target_still_rebinds(self):
+        """agents-zvdnb: the invariant is claim-names-target, NOT claim-vs-popped-id - a row
+        claiming [index, css] while citing the cross-file index may be re-bound onto css,
+        because the row ends up citing an id its claim names."""
+        rows = [{"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+                 "covered_candidate_ids": ["index", "css"]}]
+        refusals = []
+        repairs = repair_cited_candidate_ids(rows, list(self.LOCATIONS),
+                                             candidate_locations=self.LOCATIONS,
+                                             refusals=refusals, claim_aggregate_coverage=True)
+        self.assertEqual(refusals, [])
+        self.assertEqual(rows[0]["candidate_id"], "css")
+        self.assertEqual(rows[0]["covered_candidate_ids"], ["index", "css"], "claim untouched")
+        self.assertEqual(repairs[0]["rule"], "path-consistency+path+line")
+
+    def test_the_reviewers_zvdnb_repro_reads_incomplete_with_named_conflicts(self):
+        """agents-zvdnb verbatim repro: the missing-id row (anchor css, claim [index, css]) and
+        the cross-file cited row (claim [img]) both have claims that do not name their bind
+        targets, so NEITHER is repaired - and even the citation-vs-claim conflict the row
+        arrived with is now named by the validator instead of reading complete 3/3."""
+        rows = [
+            {"path": "other.html", "line_number": 3,
+             "covered_candidate_ids": ["index", "css"], "anchor_candidate_id": "css"},
+            {"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+             "covered_candidate_ids": ["img"], "anchor_candidate_id": "img"},
+        ]
+        refusals = []
+        locations = {**self.LOCATIONS, "img": {"path": "other.html", "line": 3}}
+        repairs = repair_cited_candidate_ids(rows, list(locations),
+                                             candidate_locations=locations,
+                                             refusals=refusals, claim_aggregate_coverage=True)
+        self.assertEqual(repairs, [], "a claimed row is never bound outside its claim")
+        self.assertNotIn("candidate_id", rows[0], "the anchor-frozen row is not bound")
+        self.assertEqual(rows[1]["candidate_id"], "index", "the mismatched row is untouched")
+        self.assertTrue(refusals)
+        from lib.findings import aggregate_candidate_coverage
+        coverage = aggregate_candidate_coverage(3, rows, presented_ids=list(locations),
+                                                slice_size=3)
+        self.assertFalse(coverage["complete"], coverage["reason"])
+        self.assertIn("row 1: candidate_id index is outside its own covered_candidate_ids",
+                      coverage["reason"])
 
 
 class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):

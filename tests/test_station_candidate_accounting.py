@@ -247,6 +247,23 @@ class TestAggregateCandidateAccounting(unittest.TestCase):
         self.assertFalse(got["complete"])
         self.assertIn("anchor_candidate_id", got["reason"])
 
+    def test_a_row_citation_outside_its_own_claim_is_named_not_silently_complete(self):
+        """agents-i67qw / agents-zvdnb: the validator must cross-check candidate_id against the
+        row's claim - the repair guards refuse what they can predict, and this is what names
+        whatever still cites outside its claim instead of reading complete."""
+        conflicting = self.cover(["A", "B", "C"], [
+            {"candidate_id": "A", "path": "a.html",
+             "covered_candidate_ids": ["B"], "anchor_candidate_id": "B"},
+            {"covered_candidate_ids": ["A", "C"]}])
+        self.assertFalse(conflicting["complete"])
+        self.assertIn("row 0: candidate_id A is outside its own covered_candidate_ids",
+                      conflicting["reason"])
+        consistent = self.cover(["A", "B"], [
+            {"candidate_id": "A", "covered_candidate_ids": ["A", "B"],
+             "anchor_candidate_id": "A"}])
+        self.assertTrue(consistent["complete"], consistent["reason"])
+        self.assertNotIn("outside its own", consistent["reason"])
+
     def test_a_claim_that_is_also_the_anchor_is_counted_once_and_never_discarded(self):
         """agents-hwjhv: anchors are not thrown away - an id claimed AND anchored already counts."""
         ids = [f"id{i:02d}" for i in range(50)]
