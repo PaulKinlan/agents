@@ -92,6 +92,9 @@ def _invalid_field_reason(field: str, value: Any) -> Optional[str]:
     return None
 
 VALID_STATES = frozenset(("new", "accepted", "wontfix", "fixed", "regressed"))
+# Agent names become candidate paths and titles; store text must not introduce a
+# separator, traversal component, control character, or unbounded path segment.
+SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 
 def audit_agent_contracts() -> List[Dict[str, Any]]:
@@ -205,7 +208,7 @@ def audit_findings_precision() -> Dict[str, Any]:
         for fpath in sorted(FINDINGS_DIR.glob("*.json")):
             # The line runner writes a different JSON contract beside the stores.
             # It has no `findings` map by design, so it is not a corrupt store.
-            if fpath.name.endswith("-line.json"):
+            if fpath.name.endswith(("-line.json", "-bundle-baseline.json")):
                 continue
             try:
                 store = json.loads(fpath.read_text(encoding="utf-8"))
@@ -226,8 +229,10 @@ def audit_findings_precision() -> Dict[str, Any]:
             stores_read.append(fpath.name)
             invalid_states = 0
             invalid_agents = 0
+            invalid_records = 0
             for item in store["findings"].values():
                 if not isinstance(item, dict):
+                    invalid_records += 1
                     continue
                 # `state` is authoritative; support a legacy `status` only when state
                 # is absent. Never treat a malformed value as new or use an untrusted
@@ -237,7 +242,7 @@ def audit_findings_precision() -> Dict[str, Any]:
                     invalid_states += 1
                     continue
                 ag = item.get("agent", "unknown")
-                if not isinstance(ag, str) or not ag.strip():
+                if not isinstance(ag, str) or not SAFE_AGENT_NAME.fullmatch(ag):
                     invalid_agents += 1
                     continue
                 st = agent_stats[ag]
@@ -253,15 +258,26 @@ def audit_findings_precision() -> Dict[str, Any]:
                     live["live_total"] += 1
                     if not has_remediation:
                         live["live_missing_remediation"] += 1
+            if invalid_records:
+                noisy_candidates.append({
+                    "rule_id": "qa-invalid-findings-record",
+                    "agent": "qa-station",
+                    "path": f"findings/{fpath.name}",
+                    "severity": "medium",
+                    "title": f"Findings store has {invalid_records} malformed record(s)",
+                    "rationale": ("Exclude non-object records from precision estimates; repair the "
+                                  "store from verified lifecycle evidence."),
+                })
             if invalid_agents:
                 noisy_candidates.append({
+
                     "rule_id": "qa-invalid-findings-agent",
                     "agent": "qa-station",
                     "path": f"findings/{fpath.name}",
                     "severity": "medium",
                     "title": f"Findings store has {invalid_agents} invalid agent identifier(s)",
                     "rationale": ("Exclude malformed records from precision estimates; verify and "
-                                  "repair each agent identifier to a nonempty string."),
+                                  "repair each agent identifier to a safe station name."),
                 })
             if invalid_states:
                 noisy_candidates.append({
