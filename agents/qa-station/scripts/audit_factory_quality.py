@@ -214,6 +214,15 @@ def main():
         "fleet_agents": fleet_names,
         "contract_issues": contract_issues,
         "agent_scorecards": precision_data["agent_scorecards"],
+        # The dispatcher presents only `candidates` and opt-in `context` to the model.
+        # Without this context a clean scan exposes just [] and the model must guess
+        # fleet size and lifecycle statistics from the SKILL.md example.
+        "context": {
+            "stores_read": precision_data["stores_read"],
+            "fleet_size": len(fleet_names),
+            "fleet_agents": fleet_names,
+            "agent_scorecards": precision_data["agent_scorecards"],
+        },
         "candidates": candidates
     }
 

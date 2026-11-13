@@ -2639,10 +2639,17 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
     else:
         identity = "count-only"
         accounted = int(reported)
-    complete = presented == 0 or accounted >= presented
-    if complete:
+    # Zero presented candidates can be vacuously complete only with zero report rows.
+    # Otherwise a model can invent findings for a clean scan and still receive PASS.
+    unpresented_rows = int(reported) if presented == 0 else 0
+    complete = unpresented_rows == 0 and (presented == 0 or accounted >= presented)
+    if unpresented_rows:
+        reason = (f"reported {unpresented_rows} row(s) when the scanner presented 0 candidates: "
+                  "no row can answer a candidate that was never presented")
+    elif complete:
         reason = ""
     elif identity == "identity-matched":
+
         reason = (
             f"cited {accounted} of the {presented} candidate id(s) shown "
             f"({total} found by the pre-pass): a partial triage is not a clean result; every row - confirmed "
@@ -2660,7 +2667,8 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
             "candidates_accounted": accounted, "complete": complete, "reason": reason,
             "identity": identity, "duplicate_cited_ids": duplicates,
             "uncited_candidate_ids": uncited,
-            "rows_without_candidate_id": rows_without_candidate_id}
+            "rows_without_candidate_id": rows_without_candidate_id,
+            **({"rows_without_presented_candidate": unpresented_rows} if unpresented_rows else {})}
 
 
 def candidate_accounting_mode(agent_cfg: Dict[str, Any]) -> str:

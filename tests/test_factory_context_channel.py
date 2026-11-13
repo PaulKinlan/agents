@@ -97,6 +97,27 @@ class TestStationContextChannel(unittest.TestCase):
         self.assertNotIn("BATCH ", prompts[0], "a single call must not be worded as a batch")
         self.assertNotIn("Station Context:", prompts[0], "no context may leak into a payload without one")
 
+    def test_empty_scan_prompt_forbids_invented_findings_without_hiding_context(self):
+        context = {"fleet_size": 2, "stores_read": [], "agent_scorecards": []}
+        prompts = self.run_payload({"candidates": [], "context": context})
+        self.assertEqual(len(prompts), 1)
+        prompt = prompts[0]
+        self.assertIn("ZERO candidates", prompt)
+        self.assertIn("return `findings: []`", prompt)
+        self.assertIn("Scanner Data:\n[]\n", prompt)
+        self.assertIn(f"Station Context:\n{json.dumps(context, indent=2)}", prompt)
+        self.assertNotIn("BATCH ", prompt)
+
+    def test_empty_scan_invented_model_row_is_rejected_before_store_dispatch(self):
+        (self.box.root / "outputs" / "probe.txt").write_text(
+            report(finding(rule_id="made-up", path="src/imaginary.py")), encoding="utf-8")
+        with self.assertRaisesRegex(factory_cli.NoVerdictError, "presented 0 candidates.*refusing findings dispatch"):
+            self.run_payload({"candidates": []})
+        run_dir, = (self.box.root / "runs").glob("probe-*")
+        rejected = json.loads((run_dir / "rejected_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(rejected["findings"][0]["path"], "src/imaginary.py")
+        self.assertFalse((self.box.root / "findings" / "trusted.json").exists())
+
     def test_context_is_separate_unsliced_and_not_an_identity_candidate(self):
         context = {"clusters": [{"cluster": i} for i in range(55)], "threat_model_summary": "model evidence",
                    "rule_id": "injected", "path": "src/context.py"}

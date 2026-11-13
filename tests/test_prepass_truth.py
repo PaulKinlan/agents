@@ -79,6 +79,10 @@ class TestPrepassFixes(unittest.TestCase):
             result = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(result["stores_read"], ["target.json"])
             self.assertEqual(result["agent_scorecards"], [])
+            self.assertEqual(result["context"]["agent_scorecards"], [])
+            self.assertEqual(result["context"]["stores_read"], ["target.json"])
+            self.assertEqual(result["context"]["fleet_size"], result["fleet_size"])
+            self.assertEqual(result["context"]["fleet_agents"], result["fleet_agents"])
             gaps = [c for c in result["candidates"] if c["rule_id"] == "qa-no-findings-store"]
             self.assertEqual(len(gaps), 1)
             self.assertIn("No findings lifecycle records", gaps[0]["title"])
