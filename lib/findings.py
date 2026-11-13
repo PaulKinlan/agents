@@ -2228,13 +2228,13 @@ def repair_missing_candidate_ids_by_location(rows: Any,
     The last guard refused when ANY other row cited the target, and a FALSE-POSITIVE row cites the id it
     dismisses - measured: modern-web read INCOMPLETE 4/6 because two finding rows omitted their ids and
     the only rows citing the candidates their locations named were dismissal rows, likely mis-cited
-    themselves (an exact id is invisible to every id-text rule, `repair_cited_candidate_id` answers
-    'exact' and leaves it). In ROW-mode accounting a citation is not an exclusive claim: coverage counts
-    DISTINCT ids, so binding the finding row onto a dismissal-cited candidate costs no other row its
-    answer, and the path rule that runs after this one (`repair_duplicate_citations_by_path`) can then
-    see the resulting duplicate and re-bind the mis-cited dismissal onto the still-uncited candidate its
-    own path names. So a target cited only by dismissal rows binds (recorded with `overrode_dismissal`),
-    while a target any CONFIRMED row cites - or one this repair already bound - still refuses: two
+    themselves. The earlier path-consistency pass (agents-oejb0) now strips exact citations whose
+    scanner-owned file contradicts their row's file before location repair runs. For same-file dismissal
+    citations that remain, ROW-mode accounting does not treat a dismissal as an exclusive claim: coverage
+    counts DISTINCT ids, and the duplicate-by-path pass can rebind a mis-cited dismissal if its own path
+    unambiguously names an uncited candidate. So a target cited only by dismissal rows binds (recorded
+    with `overrode_dismissal`); a cross-file citation instead records a path-consistency repair. A target
+    any CONFIRMED row cites - or one this repair already bound - still refuses: two
     answering rows on one candidate is the double-booking the guard exists for. In AGGREGATE mode the
     refusal stays for dismissal citations too: there a row claims its candidate through
     `covered_candidate_ids`, two rows claiming one candidate is a coverage problem in itself, and

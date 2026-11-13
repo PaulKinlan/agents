@@ -2513,13 +2513,13 @@ class TestADismissalCitationDoesNotOwnTheCandidate(unittest.TestCase):
         after = self.coverage(rows)
         self.assertTrue(after["complete"], after)
         self.assertEqual(after["candidates_accounted"], 6)
-        overridden = [record for record in repairs if record.get("overrode_dismissal")]
-        self.assertEqual(sorted(record["repaired"] for record in overridden),
-                         ["cand-1", "cand-2"],
-                         "the binds that crossed a dismissal citation say so, for audit")
-        re_bound = [record for record in repairs if record["rule"] == "path"]
-        self.assertEqual(sorted(record["repaired"] for record in re_bound), ["cand-3", "cand-4"],
-                         "the mis-cited dismissals are re-bound by their own paths")
+        # agents-oejb0 first strips exact citations that contradict their scanner-owned file;
+        # their own location then rebinds the dismissals, without overriding any citation.
+        self.assertFalse(any(record.get("overrode_dismissal") for record in repairs))
+        self.assertEqual(sorted(record["repaired"] for record in repairs
+                                if record["rule"].startswith("path-consistency+")),
+                         ["cand-3", "cand-4"],
+                         "mis-cited dismissals are audited as path-consistency repairs")
 
     def test_a_dismissal_only_citation_fills_in_row_mode(self):
         # Every other candidate already answered, so the resulting duplicate costs no coverage and
