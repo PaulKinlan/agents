@@ -2042,6 +2042,20 @@ def repair_duplicate_citations_by_path(rows: Any, presented: Iterable[str],
             matches = by_path.get(_normalise_cited_path(row.get("path")), [])
             if len(matches) != 1 or matches[0] not in still_uncited:
                 continue
+            # agents-ws8ou / agents-zvdnb: this re-bind is the 2+-citation population the
+            # mismatch guard skips, and the invariant is the same one - a claimed row must end
+            # up citing an id its claim names. The target is known here, so the check is
+            # direct: a claim that does not name it refuses the row untouched, and the
+            # surviving duplicate refusal below still reports the accounting consequence.
+            if _row_carries_aggregate_claim(row):
+                conflict = _aggregate_claim_conflict(row, matches[0])
+                if conflict is not None:
+                    if refusals is not None:
+                        refusals.append({
+                            "cited": cid, "path": row.get("path"),
+                            "reason": (f"duplicated citation: {conflict}; the row is left "
+                                       f"untouched rather than re-bound by path")})
+                    continue
             target = matches[0]
             row["candidate_id"] = target
             still_uncited.discard(target)
@@ -2077,6 +2091,42 @@ def repair_duplicate_citations_by_path(rows: Any, presented: Iterable[str],
                 f"{f', +{len(remaining) - 4} more' if len(remaining) > 4 else ''})"),
         })
     return applied
+
+
+def _row_carries_aggregate_claim(row: Dict[str, Any]) -> bool:
+    """agents-i67qw/agents-zvdnb: a covered_candidate_ids list or an anchor_candidate_id is a
+    claimed disposition, whether or not the run opted into aggregate accounting - the fields
+    themselves declare it."""
+    covered = row.get("covered_candidate_ids")
+    return ((isinstance(covered, list) and bool(covered))
+            or isinstance(row.get("anchor_candidate_id"), str))
+
+
+def _aggregate_claim_conflict(row: Dict[str, Any], target: str) -> Optional[str]:
+    """Why binding `row` to `target` would leave it citing an id its own claim does not name.
+
+    THE INVARIANT THE PATH REPAIRS PRESERVE (agents-i67qw, agents-ws8ou, agents-zvdnb): a row
+    that carries an aggregate claim must end up citing a candidate the claim names. A claim
+    that names neither the popped id nor the re-bind target is the same conflict the first
+    guard caught, reached through a different citation; an anchor-frozen row (anchor present)
+    has its claim fixed by contract, so only a target the claim already names may be bound.
+    A row with no claim is an ordinary row and cannot conflict.
+    """
+    covered = row.get("covered_candidate_ids")
+    if isinstance(covered, list) and covered:
+        if target in covered:
+            return None
+        return (f"the row's aggregate coverage fields claim {covered!r}, which does not name "
+                f"{target!r} - binding it would leave the row citing a candidate its own "
+                f"claim does not name")
+    anchor = row.get("anchor_candidate_id")
+    if isinstance(anchor, str):
+        if anchor == target:
+            return None
+        return (f"the row's anchor_candidate_id {anchor!r} is primary identity and its claim "
+                f"does not name {target!r} - binding it would leave the row citing a candidate "
+                f"its own claim does not name")
+    return None
 
 
 def repair_cited_candidate_ids(rows: Any,
@@ -2126,6 +2176,40 @@ def repair_cited_candidate_ids(rows: Any,
                     and isinstance(location, dict)
                     and location.get("path") and path != _normalise_cited_path(location["path"])
                     and len(citations.get(cid, ())) == 1):
+                # agents-i67qw / agents-ws8ou / agents-zvdnb: an AGGREGATE row's id is not just
+                # a citation - covered_candidate_ids/anchor_candidate_id claim a disposition,
+                # and the invariant the repair must preserve is that the row ENDS UP citing an
+                # id its claim names. So a claimed row is only popped when the candidate its own
+                # path (and line) uniquely names is inside its claim; any claimed row whose
+                # target is unpredictable or outside its claim is refused untouched - the
+                # repair never replaces a claimed disposition it cannot verify (and the
+                # aggregate validator flags whatever still slips through). Shape-based: the
+                # fields themselves declare the claim, flag or no flag.
+                if _row_carries_aggregate_claim(row):
+                    predicted = [c for c, loc in candidate_locations.items()
+                                 if c in own_ids and isinstance(loc, dict)
+                                 and loc.get("path")
+                                 and _normalise_cited_path(loc.get("path")) == path]
+                    line = _usable_line_number(row.get("line_number"))
+                    if line is not None and len(predicted) > 1:
+                        on_line = [c for c in predicted
+                                   if isinstance(candidate_locations[c], dict)
+                                   and candidate_locations[c].get("line") == line]
+                        if len(on_line) == 1:
+                            predicted = on_line
+                    conflict = (_aggregate_claim_conflict(row, predicted[0])
+                                if len(predicted) == 1 else
+                                "its own path does not name exactly one presented candidate, so "
+                                "the id the row would end up citing cannot be verified against "
+                                "its claim")
+                    if conflict is not None:
+                        if refusals is not None:
+                            refusals.append({
+                                "cited": cid, "path": row.get("path"),
+                                "reason": (f"candidate_id belongs to {location['path']!r}, not the "
+                                           f"row's path {row.get('path')!r}, and {conflict}; the row "
+                                           f"is left untouched rather than re-bound")})
+                        continue
                 mismatched[id(row)] = (row, cid, location["path"])
                 row.pop("candidate_id")
     for row in rows if isinstance(rows, list) else ():
@@ -2409,6 +2493,18 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                                                 f"({target}) is already cited by another row")})
                 continue
             record_overridden = True
+        # agents-zvdnb: a claimed row (anchor-frozen or carrying covered_candidate_ids) may only
+        # be bound to a candidate its claim names - otherwise the binding CREATES the conflict
+        # the aggregate validator would otherwise have to catch. An anchor-less covered row is
+        # exempt: its claim is extensible by contract, and the opt-in branch below records the
+        # extension (coverage_added) in the repair.
+        if _row_carries_aggregate_claim(row) and isinstance(row.get("anchor_candidate_id"), str):
+            conflict = _aggregate_claim_conflict(row, target)
+            if conflict is not None:
+                if refusals is not None:
+                    refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                     "reason": (f"row carries no candidate_id and {conflict}")})
+                continue
         row["candidate_id"] = target
         cited.add(target)
         bound_here.add(target)
@@ -2457,6 +2553,15 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                        or any(location.get("path") == path for location in elsewhere.values())):
             target = None
         if target and target in own and target not in cited:
+            # agents-zvdnb: same claim invariant as the location bind above - an anchor-frozen
+            # claimed row may not be bound outside its claim by the relocation rule either.
+            if isinstance(row.get("anchor_candidate_id"), str):
+                conflict = _aggregate_claim_conflict(row, target)
+                if conflict is not None:
+                    if refusals is not None:
+                        refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                         "reason": (f"row carries no candidate_id and {conflict}")})
+                    continue
             row["candidate_id"] = target
             cited.add(target)
             record = {"cited": None, "repaired": target,
@@ -2798,6 +2903,14 @@ def aggregate_candidate_coverage(candidates_in: Optional[int],
         if row_set & claimed:
             problems.append(f"row {index}: duplicate covered_candidate_ids across rows")
         claimed.update(row_set)
+        # agents-i67qw / agents-zvdnb: a row's own citation must be inside its claim. A row that
+        # cites candidate_id=X while claiming only [Y] is the conflict the path repairs refuse -
+        # and whatever a repair or a station still lets through is named HERE rather than read as
+        # a silently complete 3/3, because this validator never cross-checked the two before.
+        cited_id = row.get("candidate_id")
+        if has_list and isinstance(cited_id, str) and cited_id.strip() and cited_id not in row_set:
+            problems.append(f"row {index}: candidate_id {cited_id.strip()} is outside its own "
+                            f"covered_candidate_ids")
         if row_set - presented_set:
             problems.append(f"row {index}: unknown/unshown covered_candidate_ids")
         if "anchor_candidate_id" in row and has_list:
