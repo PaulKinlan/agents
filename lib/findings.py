@@ -1621,6 +1621,10 @@ def read_candidate_count(run_dir: Any) -> Optional[int]:
     found nothing, which is vacuously complete.
     """
     payload = _read_candidate_payload(run_dir)
+    # The dispatcher also accepts a bare scanner list and presents it directly.
+    # [] is an observed zero-candidate pre-pass, not an absent pre-pass.
+    if isinstance(payload, list):
+        return len(payload)
     if isinstance(payload, dict):
         candidates = payload.get("candidates")
         if isinstance(candidates, list):
@@ -1697,7 +1701,7 @@ def read_presented_candidate_ids(run_dir: Any,
     payload = _read_candidate_payload(run_dir)
     if payload is None:
         return None
-    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    candidates = payload.get("candidates") if isinstance(payload, dict) else payload
     if not isinstance(candidates, list):
         return []
     ids: List[str] = []
@@ -1792,7 +1796,7 @@ def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
     disables the location repair rather than inventing a binding.
     """
     payload = _read_candidate_payload(run_dir)
-    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    candidates = payload.get("candidates") if isinstance(payload, dict) else payload
     if not isinstance(candidates, list):
         return {}
     locations: Dict[str, Dict[str, Any]] = {}
