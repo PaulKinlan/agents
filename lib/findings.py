@@ -2095,12 +2095,35 @@ def repair_cited_candidate_ids(rows: Any,
 
     `candidate_locations` (`candidate_id -> {path, line}`, `read_candidate_locations`) enables the repair
     for a row that carries NO id at all (agents-op02b, `repair_missing_candidate_ids_by_location`). It is
-    a superset of `candidate_paths`, so a caller holding it needs to pass only this one.
+    a superset of `candidate_paths`, so a caller holding it needs to pass only this one. It also
+    lets us invalidate an exact id cited on a different file before that id can block the
+    location repair of its real row; only an unambiguous location may rebind the invalid row.
     """
     if candidate_paths is None and candidate_locations:
         candidate_paths = {cid: location["path"] for cid, location in candidate_locations.items()
                            if isinstance(location, dict) and location.get("path")}
     repairs: List[Dict[str, Any]] = []
+    # A citation whose pre-pass file contradicts the row's file must not reserve that candidate.
+    # Keep unknown paths/ids and sibling-batch ids untouched. Duplicated ids stay with the
+    # existing duplicate-by-path repair, which preserves its audit rule and refusal semantics.
+    mismatched = {}
+    if candidate_locations and isinstance(rows, list):
+        own_ids = {cid for cid in presented if isinstance(cid, str)}
+        own_paths = {_normalise_cited_path(candidate_locations[cid].get("path"))
+                     for cid in own_ids if isinstance(candidate_locations.get(cid), dict)}
+        citations = _rows_by_cited_id(row for row in rows if isinstance(row, dict))
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cid = row.get("candidate_id")
+            path = _normalise_cited_path(row.get("path"))
+            location = candidate_locations.get(cid) if isinstance(cid, str) else None
+            if (isinstance(cid, str) and cid in own_ids and path in own_paths
+                    and isinstance(location, dict)
+                    and location.get("path") and path != _normalise_cited_path(location["path"])
+                    and len(citations.get(cid, ())) == 1):
+                mismatched[id(row)] = (row, cid, location["path"])
+                row.pop("candidate_id")
     for row in rows if isinstance(rows, list) else ():
         if not isinstance(row, dict):
             continue
@@ -2121,9 +2144,21 @@ def repair_cited_candidate_ids(rows: Any,
     # missing-id rule must not double-book a candidate an id-text row already names, and the duplicate
     # rule can only see duplicates among the citations that survived.
     if candidate_locations:
+        before = len(repairs)
         repair_missing_candidate_ids_by_location(
             rows, presented, candidate_locations, repairs, refusals,
             claim_aggregate_coverage=claim_aggregate_coverage)
+        for row, cited, candidate_path in mismatched.values():
+            matched = next((record for record in repairs[before:]
+                            if record["path"] == row.get("path")
+                            and record["repaired"] == row.get("candidate_id")), None)
+            if matched is not None:
+                matched["cited"] = cited
+                matched["rule"] = "path-consistency+" + matched["rule"]
+            elif refusals is not None:
+                refusals.append({"cited": cited, "path": row.get("path"),
+                                 "reason": f"candidate_id belongs to {candidate_path!r}, "
+                                           f"not the row's path {row.get('path')!r}"})
     repair_duplicate_citations_by_path(rows, presented, candidate_paths, repairs, refusals)
     return repairs
 
