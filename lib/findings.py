@@ -2122,6 +2122,28 @@ def repair_cited_candidate_ids(rows: Any,
                     and isinstance(location, dict)
                     and location.get("path") and path != _normalise_cited_path(location["path"])
                     and len(citations.get(cid, ())) == 1):
+                # agents-i67qw: an AGGREGATE row's popped id is not just a citation -
+                # covered_candidate_ids/anchor_candidate_id echo it as a claimed disposition.
+                # Rebinding the row would leave the claim naming the old candidate while the row
+                # now cites a different one (and the aggregate validator never cross-checks
+                # candidate_id against the claim, so the conflict would pass silently), and
+                # synchronizing the fields would silently REPLACE a claimed disposition - the
+                # repair cannot tell "citation is the lie" from "path is the lie". Identity
+                # repairs do not rewrite coverage claims (the rule-only relocation contract),
+                # so such a row is refused untouched and left for the bounded batch retry.
+                # Shape-based: the fields themselves declare the claim, flag or no flag.
+                covered = row.get("covered_candidate_ids")
+                if (row.get("anchor_candidate_id") == cid
+                        or (isinstance(covered, list) and cid in covered)):
+                    if refusals is not None:
+                        refusals.append({
+                            "cited": cid, "path": row.get("path"),
+                            "reason": (f"candidate_id belongs to {location['path']!r}, not the "
+                                       f"row's path {row.get('path')!r}, and the row's aggregate "
+                                       f"coverage fields claim {cid!r} - the claim contradicts the "
+                                       f"row's own path, so the row is left untouched rather than "
+                                       f"silently re-bound to a different candidate")})
+                    continue
                 mismatched[id(row)] = (row, cid, location["path"])
                 row.pop("candidate_id")
     for row in rows if isinstance(rows, list) else ():

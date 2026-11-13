@@ -2143,6 +2143,60 @@ class TestCandidateIdPathConsistency(unittest.TestCase):
         self.assertEqual(repair_cited_candidate_ids(rows, ["index"], candidate_locations={}), [])
         self.assertEqual(rows[0]["candidate_id"], "index")
 
+    LOCATIONS = {"index": {"path": "index.html", "line": 8},
+                 "css": {"path": "dialog.css", "line": 12}}
+
+    def test_an_aggregate_claim_contradicting_the_rows_path_is_refused_not_rebound(self):
+        """agents-i67qw: the mismatch rule popped a cross-file id from a row whose aggregate
+        fields claim the SAME id, then re-bound candidate_id to the row's own file while
+        covered_candidate_ids/anchor_candidate_id kept the old name - a conflict the
+        aggregate validator never cross-checks. The row is refused untouched instead: the
+        repair must not silently replace a claimed disposition, and it cannot tell
+        "citation is the lie" from "path is the lie"."""
+        for aggregate in (True, False):     # shape-based: the fields declare the claim
+            with self.subTest(claim_aggregate_coverage=aggregate):
+                rows = [{"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+                         "covered_candidate_ids": ["index"],
+                         "anchor_candidate_id": "index"}]
+                refusals = []
+                repairs = repair_cited_candidate_ids(
+                    rows, list(self.LOCATIONS), candidate_locations=self.LOCATIONS,
+                    refusals=refusals, claim_aggregate_coverage=aggregate)
+                self.assertEqual(repairs, [])
+                self.assertEqual(rows[0]["candidate_id"], "index", "row left untouched")
+                self.assertEqual(rows[0]["covered_candidate_ids"], ["index"])
+                self.assertEqual(rows[0]["anchor_candidate_id"], "index")
+                self.assertEqual(len(refusals), 1, refusals)
+                self.assertIn("aggregate coverage fields claim 'index'", refusals[0]["reason"])
+                self.assertIn("belongs to 'index.html'", refusals[0]["reason"])
+
+    def test_an_anchor_only_aggregate_row_contradicting_its_path_is_refused(self):
+        # anchor_candidate_id is primary identity, never coverage (agents-hwjhv) - but it
+        # still names the id the row's path contradicts, so the same refusal applies.
+        rows = [{"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+                 "anchor_candidate_id": "index"}]
+        refusals = []
+        repairs = repair_cited_candidate_ids(rows, list(self.LOCATIONS),
+                                             candidate_locations=self.LOCATIONS,
+                                             refusals=refusals)
+        self.assertEqual(repairs, [])
+        self.assertEqual(rows[0]["candidate_id"], "index")
+        self.assertEqual(rows[0]["anchor_candidate_id"], "index")
+        self.assertEqual(len(refusals), 1)
+
+    def test_aggregate_fields_naming_another_candidate_do_not_block_the_rebind(self):
+        # The claim names css - the candidate the row's own path evidences - so the cited id
+        # is stale noise, not a disposition: the mismatch repair proceeds as before and the
+        # untouched claim stays consistent with the rebound citation.
+        rows = [{"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+                 "covered_candidate_ids": ["css"], "anchor_candidate_id": "css"}]
+        repairs = repair_cited_candidate_ids(rows, list(self.LOCATIONS),
+                                             candidate_locations=self.LOCATIONS)
+        self.assertEqual(rows[0]["candidate_id"], "css")
+        self.assertEqual(rows[0]["covered_candidate_ids"], ["css"], "claim untouched")
+        self.assertEqual(repairs[0]["cited"], "index")
+        self.assertEqual(repairs[0]["rule"], "path-consistency+path+line")
+
 
 class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):
     """The four conditions that must ALL hold before a duplicated citation is re-bound (agents-amgst)."""
