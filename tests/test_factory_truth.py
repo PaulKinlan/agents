@@ -988,9 +988,11 @@ class TestAggregateClaimedLineJudge(SandboxCase):
     def test_non_object_report_row_is_not_an_empty_clean_aggregate(self):
         ok, _, station = self.station(json.dumps({"summary": "s", "findings": ["not-a-row"]}), n=0)
         self.assertFalse(ok)
-        self.assertEqual(station["status"], "INCOMPLETE")
-        self.assertIn("expected a finding object", station["note"])
+        self.assertEqual(station["status"], "ERROR")
+        self.assertIn("presented 0 candidates", station["error"])
         self.assertFalse(json.loads(self.box.findings("target-line.json"))["complete"])
+        self.assertFalse((self.box.root / "findings" / "target.json").exists(),
+                         "invalid aggregate rows must be rejected before store dispatch")
 
     def test_old_row_mode_fixtures_keep_the_same_scores_and_no_claims_key(self):
         ok, _, row = self.station(candidates(2), mode="row", n=2)

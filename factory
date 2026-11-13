@@ -3177,7 +3177,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             _verify_candidates_integrity(candidates_file, candidates_snapshot)
             # Coverage at line level cannot undo a store write: reject fabricated rows
             # before the findings child can persist or publish them, including direct runs.
-            if accounting_mode == "row" and read_candidate_count(run_dir) == 0 and (
+            if read_candidate_count(run_dir) == 0 and (
                 report.get("findings") or report.get("verifications")
             ):
                 _write_run_artifact(run_dir / "rejected_report.json", json.dumps(report, indent=2))
