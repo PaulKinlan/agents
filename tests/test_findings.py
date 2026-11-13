@@ -2070,6 +2070,42 @@ class TestADuplicatedCitationIsNamedAndRepairedByPath(unittest.TestCase):
                          "no candidate paths = no evidence, so the citation stays as written")
         self.assertEqual(rows[1]["candidate_id"], "d21fff3b2fa42e68")
 
+    def test_an_aggregate_row_claiming_the_duplicated_id_is_refused_not_re_bound(self):
+        """agents-ws8ou (reviewer finding on agents-i67qw, reproduced on ca32e970): the
+        duplicate-by-path rule re-binds exactly the 2+-citation population the mismatch
+        guard skips, so the bead's conflicting shape survived through THIS rule. The
+        reviewer's repro: two rows cite `index`; the aggregate row claiming index must be
+        refused untouched while the other duplicate re-binds, and the run's own refusal
+        names the claim-vs-path conflict."""
+        locations = {"index": {"path": "index.html", "line": 8},
+                     "css": {"path": "dialog.css", "line": 12},
+                     "img": {"path": "other.html", "line": 3}}
+        rows = [
+            {"candidate_id": "index", "path": "dialog.css", "line_number": 12,
+             "covered_candidate_ids": ["index"], "anchor_candidate_id": "index"},
+            {"candidate_id": "index", "path": "other.html", "line_number": 3,
+             "covered_candidate_ids": ["img"], "anchor_candidate_id": "img"},
+            {"candidate_id": "img", "path": "other.html", "line_number": 3,
+             "covered_candidate_ids": ["css"]},
+        ]
+        refusals = []
+        repairs = repair_cited_candidate_ids(
+            rows, list(locations), candidate_locations=locations,
+            refusals=refusals, claim_aggregate_coverage=True)
+        self.assertEqual(repairs, [],
+                         "the claiming row is refused; the sibling duplicate is blocked by the "
+                         "still-uncited rule (img is already cited by row 3)")
+        self.assertEqual(rows[0]["candidate_id"], "index", "the claiming row is untouched")
+        self.assertEqual(rows[0]["covered_candidate_ids"], ["index"])
+        self.assertEqual(rows[0]["anchor_candidate_id"], "index")
+        self.assertEqual(rows[1]["candidate_id"], "index")
+        aggregate_refusals = [r for r in refusals if "aggregate coverage fields claim" in r.get("reason", "")]
+        self.assertEqual(len(aggregate_refusals), 1, refusals)
+        self.assertEqual(aggregate_refusals[0]["cited"], "index")
+        self.assertIn("names 'css'", aggregate_refusals[0]["reason"])
+        self.assertTrue(any("duplicated citation" in r.get("reason", "") for r in refusals),
+                        "the surviving duplicate still reports its accounting consequence")
+
     def test_the_candidate_paths_are_read_from_the_run_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)

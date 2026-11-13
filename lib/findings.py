@@ -2038,6 +2038,24 @@ def repair_duplicate_citations_by_path(rows: Any, presented: Iterable[str],
             matches = by_path.get(_normalise_cited_path(row.get("path")), [])
             if len(matches) != 1 or matches[0] not in still_uncited:
                 continue
+            # agents-ws8ou (reviewer finding on agents-i67qw): the mismatch guard above only
+            # covers a SINGLE-citation id, and this re-bind is exactly the population it skips.
+            # A row whose aggregate fields claim the duplicated id would be re-bound here while
+            # covered_candidate_ids/anchor_candidate_id kept the old name - the same silent
+            # conflict, created by a different rule. Refuse such a row untouched, exactly as the
+            # mismatch rule does; the surviving duplicate refusal below still reports the
+            # accounting consequence (how many candidates stay unaccounted).
+            covered = row.get("covered_candidate_ids")
+            if (row.get("anchor_candidate_id") == cid
+                    or (isinstance(covered, list) and cid in covered)):
+                if refusals is not None:
+                    refusals.append({
+                        "cited": cid, "path": row.get("path"),
+                        "reason": (f"duplicated citation: the row's aggregate coverage fields "
+                                   f"claim {cid!r} while its own path names {matches[0]!r} - the "
+                                   f"claim contradicts the row's path, so the row is left untouched "
+                                   f"rather than re-bound by path")})
+                continue
             target = matches[0]
             row["candidate_id"] = target
             still_uncited.discard(target)
