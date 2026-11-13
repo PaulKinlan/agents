@@ -2195,7 +2195,9 @@ def repair_missing_candidate_ids_by_location(rows: Any,
       * no candidate OUTSIDE the presented population (a sibling batch, or a pre-pass record the prompt
         never carried) matches the location as well or better - the same sibling rule the id-text repair
         uses (agents-fv5uk), one level over;
-      * the candidate is not already cited by another row - a citation is never double-booked.
+      * the candidate is not already cited by a CONFIRMED row, nor bound earlier in this pass - a
+        citation is never double-booked (a FALSE-POSITIVE row's citation is a dismissal, not a claim;
+        see agents-kjrtk below);
     Everything refused is appended to `refusals` with the reason, because "7 rows lost their id" and "7
     rows could not be matched" are different operator problems and the run directory has to tell them apart.
 
@@ -2221,6 +2223,22 @@ def repair_missing_candidate_ids_by_location(rows: Any,
     unshown candidate singled out refuses (the row describes a candidate this batch never carried), a
     shared identity refuses as ambiguous, and a contradicting identity refuses as k4pf1 does. A row with
     no rule or title keeps the guard exactly as conservative as before.
+
+    A DISMISSAL IS NOT A CLAIM ON THE CANDIDATE (agents-kjrtk, chrome-status-lite nightly 2026-11-13).
+    The last guard refused when ANY other row cited the target, and a FALSE-POSITIVE row cites the id it
+    dismisses - measured: modern-web read INCOMPLETE 4/6 because two finding rows omitted their ids and
+    the only rows citing the candidates their locations named were dismissal rows, likely mis-cited
+    themselves (an exact id is invisible to every id-text rule, `repair_cited_candidate_id` answers
+    'exact' and leaves it). In ROW-mode accounting a citation is not an exclusive claim: coverage counts
+    DISTINCT ids, so binding the finding row onto a dismissal-cited candidate costs no other row its
+    answer, and the path rule that runs after this one (`repair_duplicate_citations_by_path`) can then
+    see the resulting duplicate and re-bind the mis-cited dismissal onto the still-uncited candidate its
+    own path names. So a target cited only by dismissal rows binds (recorded with `overrode_dismissal`),
+    while a target any CONFIRMED row cites - or one this repair already bound - still refuses: two
+    answering rows on one candidate is the double-booking the guard exists for. In AGGREGATE mode the
+    refusal stays for dismissal citations too: there a row claims its candidate through
+    `covered_candidate_ids`, two rows claiming one candidate is a coverage problem in itself, and
+    `aggregate_candidate_coverage` rejects the duplicate claim this bind would create.
     """
     presented_ids: List[str] = []
     for value in presented or ():
@@ -2243,16 +2261,24 @@ def repair_missing_candidate_ids_by_location(rows: Any,
         return 1 if line is not None and location.get("line") == line else 2
 
     cited = set()
+    # agents-kjrtk: only a citation from a CONFIRMED row claims the candidate for one answer; a
+    # false-positive row's citation is a dismissal, judged by the same predicate the coverage count and
+    # the store use (`is_false_positive`), so it cannot outrank the location evidence a finding row carries.
+    cited_findings = set()
     for row in rows_list:
         current = row.get("candidate_id")
         if isinstance(current, str) and current.strip():
             cited.add(current.strip())
+            if not is_false_positive(row):
+                cited_findings.add(current.strip())
+    bound_here: set = set()
 
     applied: List[Dict[str, Any]] = []
     for row in rows_list:
         current = row.get("candidate_id")
         if isinstance(current, str) and current.strip():
             continue                                  # id-text and duplicate rules own that row
+        record_overridden = False
         path = _normalise_cited_path(row.get("path"))
         line = _usable_line_number(row.get("line_number"))
         if not path:
@@ -2365,16 +2391,25 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                                             f"({sorted(better)[0]}) matches its location at least as well")})
             continue
         if target in cited:
-            if refusals is not None:
-                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
-                                 "reason": (f"row carries no candidate_id and the candidate its location names "
-                                            f"({target}) is already cited by another row")})
-            continue
+            # A dismissal's citation does not own the candidate (agents-kjrtk), but a CONFIRMED row's
+            # does, and so does a bind this repair already made: never two answers on one candidate.
+            # Aggregate mode keeps the old refusal outright - there the bind would double-claim
+            # coverage through covered_candidate_ids.
+            if claim_aggregate_coverage or target in cited_findings or target in bound_here:
+                if refusals is not None:
+                    refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                     "reason": (f"row carries no candidate_id and the candidate its location names "
+                                                f"({target}) is already cited by another row")})
+                continue
+            record_overridden = True
         row["candidate_id"] = target
         cited.add(target)
+        bound_here.add(target)
         record = {"cited": None, "repaired": target,
                   "rule": "+".join(["path+line" if best_rank == 1 else "path"] + narrowed_on),
                   "path": row.get("path")}
+        if record_overridden:
+            record["overrode_dismissal"] = True
         if claim_aggregate_coverage and "anchor_candidate_id" not in row:
             # An anchor-only row explicitly chooses primary identity but does NOT claim coverage;
             # preserve that contract and leave it for the bounded batch retry. Only the opt-in

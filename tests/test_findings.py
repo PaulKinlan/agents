@@ -2446,6 +2446,129 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
         self.assertEqual(after["rows_without_candidate_id"], 0)
 
 
+class TestADismissalCitationDoesNotOwnTheCandidate(unittest.TestCase):
+    """agents-kjrtk, chrome-status-lite nightly 2026-11-13: modern-web went INCOMPLETE 4/6 because
+    two finding rows omitted their candidate_id and the rows citing the candidates their locations
+    named were FALSE-POSITIVE rows (37e05b5d2b3c5378 -> src/routes/diff.ts, caf3ac19375f640b ->
+    static/styles/diff.css). A dismissal row's citation is not a claim on the candidate: in row-mode
+    accounting coverage counts DISTINCT ids, so the location fill costs no other row its answer - and
+    once the finding row is bound, the path rule can re-bind a mis-cited dismissal onto the still-
+    uncited candidate its own path names, which is what recovers the incident's missing two.
+
+    The six-candidate shape below is the incident exactly: four dismissals, two of them citing the
+    wrong ids (the diff.ts/diff.css candidates instead of the docs ones), and two finding rows with no
+    id at all. Before the fix the fills were refused and the run stayed 4/6.
+    """
+
+    LOCATIONS = {
+        "cand-1": {"path": "src/routes/diff.ts", "line": 42, "rule_id": "modcheck"},
+        "cand-2": {"path": "static/styles/diff.css", "line": 17, "rule_id": "modcheck"},
+        "cand-3": {"path": "docs/index.md", "line": 1},
+        "cand-4": {"path": "docs/guide.md", "line": 2},
+        "cand-5": {"path": "app/s.ts", "line": 9},
+        "cand-6": {"path": "app/t.ts", "line": 3},
+    }
+    PRESENTED = ["cand-1", "cand-2", "cand-3", "cand-4", "cand-5", "cand-6"]
+
+    def incident_rows(self):
+        return [
+            {"path": "src/routes/diff.ts", "line_number": 42},          # finding, no id
+            {"candidate_id": "cand-5", "path": "app/s.ts", "line_number": 9,
+             "false_positive": True},
+            {"path": "static/styles/diff.css", "line_number": 17},      # finding, no id
+            {"candidate_id": "cand-6", "path": "app/t.ts", "line_number": 3,
+             "false_positive": True},
+            # The two mis-cited dismissals: they cite the diff candidates but describe the docs files.
+            {"candidate_id": "cand-1", "path": "docs/index.md", "line_number": 1,
+             "false_positive": True},
+            {"candidate_id": "cand-2", "path": "docs/guide.md", "line_number": 2,
+             "false_positive": True},
+        ]
+
+    def repair(self, rows, aggregate=False):
+        refusals = []
+        repairs = repair_cited_candidate_ids(rows, self.PRESENTED, refusals=refusals,
+                                             candidate_locations=self.LOCATIONS,
+                                             claim_aggregate_coverage=aggregate)
+        return repairs, refusals
+
+    def coverage(self, rows):
+        return candidate_coverage(6, len(rows), presented_ids=self.PRESENTED,
+                                  cited_ids=[row.get("candidate_id") for row in rows])
+
+    def test_the_incident_shape_now_accounts_for_every_candidate(self):
+        rows = self.incident_rows()
+        before = self.coverage(rows)
+        self.assertFalse(before["complete"])
+        self.assertEqual((before["candidates_accounted"], before["candidates_presented"]), (4, 6))
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(refusals, [])
+        self.assertEqual(sorted(row.get("candidate_id") for row in rows), sorted(self.PRESENTED),
+                         "the finding rows bind their locations' candidates; the mis-cited "
+                         "dismissals move onto the candidates their own paths name")
+        self.assertEqual((rows[0]["candidate_id"], rows[2]["candidate_id"]), ("cand-1", "cand-2"),
+                         "each finding row binds the candidate its own location names")
+        self.assertEqual((rows[4]["candidate_id"], rows[5]["candidate_id"]), ("cand-3", "cand-4"),
+                         "each mis-cited dismissal moves onto the candidate its own path names")
+        after = self.coverage(rows)
+        self.assertTrue(after["complete"], after)
+        self.assertEqual(after["candidates_accounted"], 6)
+        overridden = [record for record in repairs if record.get("overrode_dismissal")]
+        self.assertEqual(sorted(record["repaired"] for record in overridden),
+                         ["cand-1", "cand-2"],
+                         "the binds that crossed a dismissal citation say so, for audit")
+        re_bound = [record for record in repairs if record["rule"] == "path"]
+        self.assertEqual(sorted(record["repaired"] for record in re_bound), ["cand-3", "cand-4"],
+                         "the mis-cited dismissals are re-bound by their own paths")
+
+    def test_a_dismissal_only_citation_fills_in_row_mode(self):
+        # Every other candidate already answered, so the resulting duplicate costs no coverage and
+        # draws no duplicate refusal (repair_duplicate_citations_by_path: remaining == []).
+        rows = [
+            {"candidate_id": "cand-1", "path": "src/routes/diff.ts", "line_number": 42,
+             "false_positive": True},
+            {"candidate_id": "cand-2", "path": "static/styles/diff.css", "line_number": 17},
+            {"candidate_id": "cand-3", "path": "docs/index.md", "line_number": 1},
+            {"candidate_id": "cand-4", "path": "docs/guide.md", "line_number": 2},
+            {"candidate_id": "cand-5", "path": "app/s.ts", "line_number": 9},
+            {"candidate_id": "cand-6", "path": "app/t.ts", "line_number": 3},
+            {"path": "src/routes/diff.ts", "line_number": 42},          # finding, no id
+        ]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(refusals, [])
+        self.assertEqual(rows[6]["candidate_id"], "cand-1")
+        self.assertTrue(repairs[0].get("overrode_dismissal"))
+
+    def test_aggregate_mode_still_refuses_a_dismissal_only_citation(self):
+        # In aggregate mode a row claims its candidate through covered_candidate_ids, so two rows on
+        # one candidate is a coverage problem in itself (duplicate covered_candidate_ids across rows).
+        rows = [{"candidate_id": "cand-1", "path": "src/routes/diff.ts", "line_number": 42,
+                 "false_positive": True, "covered_candidate_ids": ["cand-1"]},
+                {"path": "src/routes/diff.ts", "line_number": 42}]
+        repairs, refusals = self.repair(rows, aggregate=True)
+        self.assertEqual(rows[1].get("candidate_id"), None)
+        self.assertEqual([record["repaired"] for record in repairs], [],
+                         "nothing was bound onto the dismissal-cited candidate in aggregate mode")
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("already cited by another row", refusals[0]["reason"])
+
+    def test_a_confirmed_row_still_blocks_and_so_does_a_bind_made_here(self):
+        # A confirmed row's citation owns the candidate (the pinned double-booking refusal).
+        rows = [{"candidate_id": "cand-1", "path": "src/routes/diff.ts", "line_number": 42},
+                {"path": "src/routes/diff.ts", "line_number": 42}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(rows[1].get("candidate_id"), None)
+        self.assertIn("already cited by another row", refusals[0]["reason"])
+        # ...and so does a candidate THIS repair already bound, whatever the bound row's polarity.
+        rows = [{"path": "src/routes/diff.ts", "line_number": 42,
+                 "false_positive": True},
+                {"path": "src/routes/diff.ts", "line_number": 42}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual([row.get("candidate_id") for row in rows], ["cand-1", None])
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("already cited by another row", refusals[0]["reason"])
+
+
 class TestRelocatedFindingCandidateRepair(unittest.TestCase):
     """A model may name an implementation file rather than the scanner's evidence file."""
 
