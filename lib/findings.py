@@ -2262,8 +2262,11 @@ def repair_missing_candidate_ids_by_location(rows: Any,
 
     cited = set()
     # agents-kjrtk: only a citation from a CONFIRMED row claims the candidate for one answer; a
-    # false-positive row's citation is a dismissal, judged by the same predicate the coverage count and
-    # the store use (`is_false_positive`), so it cannot outrank the location evidence a finding row carries.
+    # false-positive row's citation is a dismissal, judged by the same predicate the findings store and
+    # the publication filter use (`is_false_positive`; agents-i0mzr: the coverage COUNT stays
+    # polarity-blind on purpose - dismissals' citations do count, which is exactly why the incident's
+    # rows could be short two ids while their candidates were cited) so it cannot outrank the location
+    # evidence a finding row carries.
     cited_findings = set()
     for row in rows_list:
         current = row.get("candidate_id")
