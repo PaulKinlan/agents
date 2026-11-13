@@ -83,6 +83,59 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual(len(gaps), 1)
             self.assertIn("No findings lifecycle records", gaps[0]["title"])
 
+    def test_qa_station_derives_missing_remediation_in_the_scorecard(self):
+        """agents-e3jru: missing_remediation was counted but never derived - no rate on the scorecard
+        and no candidate rule, so an agent whose findings systematically lack remediation never
+        surfaced the way a high wontfix rate does (agents-xoxum declares it on the schema)."""
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_e3jru", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_e3jru", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            findings_dir = Path(tmp)
+            records = {f"f{i}": {"agent": "lint", "state": "new",
+                                 **({"remediation": "r"} if i < 1 else {})}
+                       for i in range(4)}       # 3 of 4 findings carry no remediation
+            (findings_dir / "proj.json").write_text(
+                json.dumps({"target": "proj", "findings": records}), encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            card, = data["agent_scorecards"]
+            self.assertEqual(card["missing_remediation"], 3)
+            self.assertEqual(card["missing_remediation_rate"], 0.75)
+            gaps = [c for c in data["noisy_candidates"] if c["rule_id"] == "qa-agent-remediation-gap"]
+            self.assertEqual(len(gaps), 1, data["noisy_candidates"])
+            self.assertEqual(gaps[0]["agent"], "lint")
+            self.assertEqual(gaps[0]["severity"], "medium")
+
+    def test_qa_station_remediation_gap_stays_quiet_below_the_threshold(self):
+        # Same 30%/>=3 shape as the wontfix rule: remediated stores must not raise the candidate,
+        # and a store too small to judge (2 findings) must not either.
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_e3jru_quiet", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_e3jru_quiet", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            findings_dir = Path(tmp)
+            (findings_dir / "all-remediated.json").write_text(json.dumps({"target": "t", "findings": {
+                f"f{i}": {"agent": "lint", "state": "new", "remediation": "r"} for i in range(4)}}),
+                encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            card, = data["agent_scorecards"]
+            self.assertEqual((card["missing_remediation"], card["missing_remediation_rate"]), (0, 0.0))
+            self.assertEqual([c for c in data["noisy_candidates"] if c["rule_id"] == "qa-agent-remediation-gap"], [])
+            (findings_dir / "all-remediated.json").unlink()
+            (findings_dir / "too-small.json").write_text(json.dumps({"target": "t", "findings": {
+                "f0": {"agent": "lint", "state": "new"},
+                "f1": {"agent": "lint", "state": "new"}}}), encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            self.assertEqual([c for c in data["noisy_candidates"] if c["rule_id"] == "qa-agent-remediation-gap"], [],
+                             "2 findings is below the >=3 floor")
+
     def test_docs_drift_git_index_sees_deleted_files(self):
         sys.path.insert(0, str(ROOT / "agents" / "docs-drift" / "scripts"))
         import check_docs  # noqa: E402
