@@ -22,7 +22,7 @@
           "regressed": { "type": "integer", "description": "Findings lifecycle count for state 'regressed' as recorded in the findings store." },
           "missing_remediation": { "type": "integer", "description": "Findings with no remediation text (agents-xoxum)." },
           "wontfix_rate": { "type": "number" },
-          "missing_remediation_rate": { "type": "number", "description": "missing_remediation / total_findings, 3dp (agents-e3jru). Over 30% on >=3 findings this surfaces as the qa-agent-remediation-gap candidate." },
+          "missing_remediation_rate": { "type": "number", "description": "Live findings (state new/accepted/regressed, not a dismissal) lacking remediation / live findings, 3dp (agents-e3jru; live-only per agents-21lfh). Over 30% on >=3 live findings this surfaces as the qa-agent-remediation-gap candidate." },
           "estimated_precision": { "type": "number" }
         }
       }
