@@ -91,6 +91,11 @@ def _invalid_field_reason(field: str, value: Any) -> Optional[str]:
         return f"expected one of {sorted(allowed)}, got {bad!r}"
     return None
 
+VALID_STATES = frozenset(("new", "accepted", "wontfix", "fixed", "regressed"))
+# Agent names become candidate paths and titles; store text must not introduce a
+# separator, traversal component, control character, or unbounded path segment.
+SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+
 
 def audit_agent_contracts() -> List[Dict[str, Any]]:
     contract_issues = []
@@ -183,6 +188,7 @@ def audit_findings_precision() -> Dict[str, Any]:
         "accepted": 0,
         "wontfix": 0,
         "fixed": 0,
+        "regressed": 0,
         "missing_remediation": 0
     })
     # agents-21lfh: the LIVE-WORK population the remediation-gap derivation reads - states whose
@@ -197,22 +203,48 @@ def audit_findings_precision() -> Dict[str, Any]:
     # The store is `findings/<target>.json` = {"target", "findings": {fingerprint: record}},
     # and a record's lifecycle is `state`. This used to glob `*-findings.json` (a name the
     # store never had) and read `status`, so it audited nothing and reported a clean fleet
-    # (journal-wog). Any JSON file of the store's shape is read; anything else is skipped.
+    # (journal-wog). A broken store is partial evidence, not a silent exclusion.
     if FINDINGS_DIR.exists():
         for fpath in sorted(FINDINGS_DIR.glob("*.json")):
+            # The line runner writes a different JSON contract beside the stores.
+            # It has no `findings` map by design, so it is not a corrupt store.
+            if fpath.name.endswith(("-line.json", "-bundle-baseline.json")):
+                continue
             try:
                 store = json.loads(fpath.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                store = None
             if not (isinstance(store, dict) and isinstance(store.get("findings"), dict)):
+                noisy_candidates.append({
+                    "rule_id": "qa-unreadable-findings-store",
+                    "agent": "qa-station",
+                    "path": f"findings/{fpath.name}",
+                    "severity": "medium",
+                    "title": "Findings store could not be audited",
+                    "rationale": ("Unreadable JSON or invalid findings-store structure: repair the "
+                                  "store before claiming fleet-wide precision. Do not infer a "
+                                  "disposition from an unreadable record."),
+                })
                 continue
             stores_read.append(fpath.name)
-
+            invalid_states = 0
+            invalid_agents = 0
+            invalid_records = 0
             for item in store["findings"].values():
                 if not isinstance(item, dict):
+                    invalid_records += 1
+                    continue
+                # `state` is authoritative; support a legacy `status` only when state
+                # is absent. Never treat a malformed value as new or use an untrusted
+                # string as a scorecard key (or confuse a corrupted store with precision).
+                status = item.get("state", item.get("status"))
+                if not isinstance(status, str) or status not in VALID_STATES:
+                    invalid_states += 1
                     continue
                 ag = item.get("agent", "unknown")
-                status = item.get("state") or item.get("status") or "new"
+                if not isinstance(ag, str) or not SAFE_AGENT_NAME.fullmatch(ag):
+                    invalid_agents += 1
+                    continue
                 st = agent_stats[ag]
                 st["total_findings"] += 1
                 st[status] = st.get(status, 0) + 1
@@ -226,6 +258,38 @@ def audit_findings_precision() -> Dict[str, Any]:
                     live["live_total"] += 1
                     if not has_remediation:
                         live["live_missing_remediation"] += 1
+            if invalid_records:
+                noisy_candidates.append({
+                    "rule_id": "qa-invalid-findings-record",
+                    "agent": "qa-station",
+                    "path": f"findings/{fpath.name}",
+                    "severity": "medium",
+                    "title": f"Findings store has {invalid_records} malformed record(s)",
+                    "rationale": ("Exclude non-object records from precision estimates; repair the "
+                                  "store from verified lifecycle evidence."),
+                })
+            if invalid_agents:
+                noisy_candidates.append({
+
+                    "rule_id": "qa-invalid-findings-agent",
+                    "agent": "qa-station",
+                    "path": f"findings/{fpath.name}",
+                    "severity": "medium",
+                    "title": f"Findings store has {invalid_agents} invalid agent identifier(s)",
+                    "rationale": ("Exclude malformed records from precision estimates; verify and "
+                                  "repair each agent identifier to a safe station name."),
+                })
+            if invalid_states:
+                noisy_candidates.append({
+                    "rule_id": "qa-invalid-findings-state",
+                    "agent": "qa-station",
+                    "path": f"findings/{fpath.name}",
+                    "severity": "medium",
+                    "title": f"Findings store has {invalid_states} invalid lifecycle state(s)",
+                    "rationale": ("Exclude malformed records from precision estimates and repair their "
+                                  "state/status to one of new, accepted, wontfix, fixed, regressed "
+                                  "after verifying the real disposition."),
+                })
 
     scorecards = []
     for ag, st in sorted(agent_stats.items()):
