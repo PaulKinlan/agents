@@ -108,6 +108,61 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual(len(gaps), 1, data["noisy_candidates"])
             self.assertEqual(gaps[0]["agent"], "lint")
             self.assertEqual(gaps[0]["severity"], "medium")
+            self.assertIn("live findings", gaps[0]["title"],
+                          "the candidate says what population it measured")
+
+    def test_qa_station_remediation_gap_measures_live_work_only(self):
+        """agents-21lfh: dismissals (false_positive rows) and suppressions (wontfix, a human-written
+        state) have no next step by design, so a store of correct rejections must not read as a
+        remediation contract gap. Only live work (new/accepted/regressed, not dismissed) counts."""
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_21lfh", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_21lfh", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            findings_dir = Path(tmp)
+            (findings_dir / "dismissals.json").write_text(json.dumps({"target": "t", "findings": {
+                f"d{i}": {"agent": "triage", "state": "new", "false_positive": True,
+                          "description": "rejected: not reproducible"} for i in range(4)}}),
+                encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            card, = data["agent_scorecards"]
+            # The RAW counter stays state- and polarity-blind by contract (agents-xoxum)...
+            self.assertEqual(card["missing_remediation"], 4)
+            # ...but the DERIVED rate reads live work, of which there is none here.
+            self.assertEqual((card["missing_remediation_rate"],
+                              [c for c in data["noisy_candidates"]
+                               if c["rule_id"] == "qa-agent-remediation-gap"]), (0.0, []))
+            (findings_dir / "dismissals.json").unlink()
+            (findings_dir / "suppressions.json").write_text(json.dumps({"target": "t", "findings": {
+                f"w{i}": {"agent": "triage", "state": "wontfix"} for i in range(4)}}),
+                encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            card, = data["agent_scorecards"]
+            self.assertEqual((card["missing_remediation_rate"],
+                              [c for c in data["noisy_candidates"]
+                               if c["rule_id"] == "qa-agent-remediation-gap"]), (0.0, []),
+                             "suppressed findings have no next step left to describe")
+            # A mixed store: the rate divides by LIVE findings, not total.
+            (findings_dir / "suppressions.json").unlink()
+            (findings_dir / "mixed.json").write_text(json.dumps({"target": "t", "findings": {
+                "live1": {"agent": "lint", "state": "new"},
+                "live2": {"agent": "lint", "state": "new"},
+                "live3": {"agent": "lint", "state": "accepted", "remediation": "r"},
+                "gone": {"agent": "lint", "state": "fixed"}}}), encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            card, = data["agent_scorecards"]
+            # The raw counter is state-blind by contract (agents-xoxum): live1, live2 AND the fixed
+            # record lack remediation text. The rate divides by the 3 LIVE findings only.
+            self.assertEqual((card["missing_remediation"], card["missing_remediation_rate"]), (3, 0.667))
+            gaps = [c for c in data["noisy_candidates"] if c["rule_id"] == "qa-agent-remediation-gap"]
+            self.assertEqual(len(gaps), 1,
+                             "2 of 3 live findings is 66.7% - over the line, and 3 live findings meets the floor")
+            self.assertIn("2 of 3 live findings", gaps[0]["title"])
 
     def test_qa_station_remediation_gap_stays_quiet_below_the_threshold(self):
         # Same 30%/>=3 shape as the wontfix rule: remediated stores must not raise the candidate,
@@ -135,6 +190,7 @@ class TestPrepassFixes(unittest.TestCase):
                 data = qa.audit_findings_precision()
             self.assertEqual([c for c in data["noisy_candidates"] if c["rule_id"] == "qa-agent-remediation-gap"], [],
                              "2 findings is below the >=3 floor")
+            self.assertEqual([c for c in data["noisy_candidates"] if c["rule_id"] == "qa-agent-high-wontfix-noise"], [])
 
     def test_docs_drift_git_index_sees_deleted_files(self):
         sys.path.insert(0, str(ROOT / "agents" / "docs-drift" / "scripts"))

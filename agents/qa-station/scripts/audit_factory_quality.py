@@ -20,9 +20,13 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+from lib.embargo import is_false_positive  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
 AGENTS_DIR = FACTORY_ROOT / "agents"
 FINDINGS_DIR = FACTORY_ROOT / "findings"
+# agents-21lfh: states whose finding is still live work. wontfix is a human suppression, fixed is
+# closed; neither has a next step left to describe.
+LIVE_WORK_STATES = frozenset(("new", "accepted", "regressed"))
 
 
 def audit_agent_contracts() -> List[Dict[str, Any]]:
@@ -61,6 +65,12 @@ def audit_findings_precision() -> Dict[str, Any]:
         "fixed": 0,
         "missing_remediation": 0
     })
+    # agents-21lfh: the LIVE-WORK population the remediation-gap derivation reads - states whose
+    # finding still asks a human for a next step, discounting dismissals (false_positive rows).
+    live_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {
+        "live_total": 0,
+        "live_missing_remediation": 0
+    })
     noisy_candidates: List[Dict[str, Any]] = []
     stores_read: List[str] = []
 
@@ -86,8 +96,16 @@ def audit_findings_precision() -> Dict[str, Any]:
                 st = agent_stats[ag]
                 st["total_findings"] += 1
                 st[status] = st.get(status, 0) + 1
-                if not item.get("remediation"):
+                has_remediation = bool(item.get("remediation"))
+                if not has_remediation:
                     st["missing_remediation"] += 1
+                # The gap derivation reads LIVE WORK only (agents-21lfh): a dismissal row has no next
+                # step by design and a suppression was written by a human, so neither is an omission.
+                if status in LIVE_WORK_STATES and not is_false_positive(item):
+                    live = live_stats[ag]
+                    live["live_total"] += 1
+                    if not has_remediation:
+                        live["live_missing_remediation"] += 1
 
     scorecards = []
     for ag, st in sorted(agent_stats.items()):
@@ -98,7 +116,16 @@ def audit_findings_precision() -> Dict[str, Any]:
         # count the SKILL.md tells the model to review, with no rate and no candidate rule, so an agent
         # whose findings systematically lack a remediation never surfaced the way a high wontfix rate
         # does. Same shape, same thresholds: a rate over the same 30% line, on the same >=3 floor.
-        missing_remediation_rate = round(st["missing_remediation"] / total, 3)
+        # agents-21lfh: measured over LIVE WORK ONLY (states new/accepted/regressed whose row is not a
+        # dismissal - is_false_positive, the same predicate the store and publication filter use). A
+        # dismissed finding has no next step by design ('evidence, not work', agents-f8dj) and a
+        # suppression comes from findings/suppressions.yaml, not from the model omitting anything, so
+        # either population alone must not read as a remediation contract gap. The raw
+        # missing_remediation counter above stays polarity- and state-blind by contract (agents-xoxum).
+        live = live_stats.get(ag) or {}
+        live_total = live.get("live_total", 0)
+        live_missing = live.get("live_missing_remediation", 0)
+        missing_remediation_rate = round(live_missing / live_total, 3) if live_total else 0.0
         scorecards.append({
             "agent": ag,
             **st,
@@ -115,14 +142,14 @@ def audit_findings_precision() -> Dict[str, Any]:
                 "title": f"Agent '{ag}' Exceeds 30% Wontfix Threshold ({wontfix_rate * 100:.1f}%)",
                 "rationale": "High wontfix ratio indicates false-positive creep; tighten deterministic pre-pass filters or SKILL.md triage rules."
             })
-        if missing_remediation_rate > 0.30 and st["total_findings"] >= 3:
+        if missing_remediation_rate > 0.30 and live_total >= 3:
             noisy_candidates.append({
                 "rule_id": "qa-agent-remediation-gap",
                 "agent": ag,
                 "path": f"agents/{ag}/SKILL.md",
                 "severity": "medium",
-                "title": (f"Agent '{ag}' omits remediation on {st['missing_remediation']} of "
-                          f"{st['total_findings']} findings ({missing_remediation_rate * 100:.1f}%)"),
+                "title": (f"Agent '{ag}' omits remediation on {live_missing} of "
+                          f"{live_total} live findings ({missing_remediation_rate * 100:.1f}%)"),
                 "rationale": ("Findings without remediation hand a human a problem with no next step; "
                               "the SKILL.md output contract must require an actionable remediation per finding.")
             })
