@@ -181,6 +181,41 @@ class TestPrepassFixes(unittest.TestCase):
                 data = qa.audit_findings_precision()
             self.assertEqual([c["rule_id"] for c in data["noisy_candidates"]], ["qa-no-findings-store"])
 
+    def test_qa_station_rejects_invalid_raw_states_before_precision_math(self):
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_states", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_states", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            findings_dir = Path(tmp)
+            (findings_dir / "proj.json").write_text(json.dumps({"target": "proj", "findings": {
+                "valid": {"agent": "lint", "state": "wontfix"},
+                "legacy": {"agent": "lint", "status": "accepted"},
+                "invalid": {"agent": "lint", "state": "WONTFIX"},
+                "not-string": {"agent": "lint", "state": ["wontfix"]},
+                "missing": {"agent": "lint"},
+                "no-fallback": {"agent": "lint", "state": "bogus", "status": "new"},
+            }}), encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                data = qa.audit_findings_precision()
+            card, = data["agent_scorecards"]
+            self.assertEqual((card["total_findings"], card["wontfix"], card["accepted"]), (2, 1, 1))
+            self.assertEqual(card["wontfix_rate"], 0.5)
+            invalid, = [c for c in data["noisy_candidates"]
+                        if c["rule_id"] == "qa-invalid-findings-state"]
+            self.assertEqual(invalid["path"], "findings/proj.json")
+            self.assertIn("4 invalid lifecycle state(s)", invalid["title"])
+            self.assertNotIn("bogus", json.dumps(invalid), "do not echo arbitrary store text")
+            (findings_dir / "proj.json").write_text(json.dumps({"target": "proj", "findings": {
+                "invalid": {"agent": "lint", "state": "bogus"}
+            }}), encoding="utf-8")
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+                only_invalid = qa.audit_findings_precision()
+            self.assertEqual(only_invalid["agent_scorecards"], [])
+            self.assertEqual({c["rule_id"] for c in only_invalid["noisy_candidates"]},
+                             {"qa-invalid-findings-state", "qa-no-findings-store"})
+
     def test_qa_station_does_not_treat_an_empty_lifecycle_file_as_measured_precision(self):
         """agents-2e8: a real station can create a valid but empty target.json; the QA
         pre-pass must still surface a measurement gap rather than report clean."""
