@@ -164,6 +164,33 @@ class TestCoverageContract(unittest.TestCase):
         selected = {line for line in gate.stdout.splitlines() if line.startswith("tests/")}
         self.assertTrue(set(contract[source]) <= selected, selected)
 
+    def test_qa_station_contract_selects_its_dynamic_consumers(self):
+        """agents-40jyn: audit_factory_quality.py is driven by SourceFileLoader from all three
+        of its consumer suites, which the oracle's import scanner cannot see - the same hole
+        agents-c8619 closed for check_docs.py. Without the contract entry the gate ran the
+        right suites while fleet-check's coverage extraction reported the changed script as
+        UNMAPPED (measured on 1eab51bf's fast gate: suites ran, coverage came back PARTIAL).
+        This pins the declaration and proves the gate selects all three contracted suites.
+        """
+        source = "agents/qa-station/scripts/audit_factory_quality.py"
+        contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(set(contract[source]),
+                         {"tests/test_candidate_id_emission.py",
+                          "tests/test_factory_truth_2.py",
+                          "tests/test_prepass_truth.py"})
+        text = (ROOT / "tests/test_prepass_truth.py").read_text(encoding="utf-8")
+        self.assertIn("SourceFileLoader", text)
+        self.assertIn("audit_factory_quality.py", text,
+                      "the dynamic consumer must still load the script")
+        gate = subprocess.run(
+            ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
+            env=dict(os.environ, GIT_CHANGED=source, FAST_GATE_DRY_RUN="1"), timeout=120,
+            check=False,
+        )
+        self.assertEqual(gate.returncode, 0, gate.stderr)
+        selected = {line for line in gate.stdout.splitlines() if line.startswith("tests/")}
+        self.assertTrue(set(contract[source]) <= selected, selected)
+
     def test_oracle_extract_coverage_flags_omitted_contract_suites(self):
         """agents-4zqo3: partial placement is not unmapped; the contracted suite still matters.
 
