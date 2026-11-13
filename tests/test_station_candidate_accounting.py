@@ -191,6 +191,14 @@ class TestCountAndIdentityAreTwoBounds(unittest.TestCase):
         self.assertIn("count-only", short["reason"], "the weaker check must name itself")
         self.assertIn("a partial triage is not a clean result", short["reason"])
 
+    def test_empty_scan_rejects_invented_rows_but_accepts_empty_report(self):
+        self.assertTrue(candidate_coverage(0, 0)["complete"])
+        got = candidate_coverage(0, 2, presented_ids=[], cited_ids=[None, None])
+        self.assertFalse(got["complete"])
+        self.assertEqual(got["rows_without_presented_candidate"], 2)
+        self.assertIn("reported 2 row(s)", got["reason"])
+        self.assertIn("presented 0 candidates", got["reason"])
+
     def test_no_prepass_still_asserts_nothing(self):
         got = candidate_coverage(None, 7)
         self.assertTrue(got["complete"])

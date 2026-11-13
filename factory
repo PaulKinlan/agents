@@ -2230,7 +2230,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         run_dir / f"context_prune.batch{batch_index + 1}.json",
                         json.dumps({"agent": agent_name, "batch": batch_index + 1,
                                     "batches": batch_count, **prune_record}, indent=2))
-            batch_prompt = header + (
+            # An empty scan has no population brief. Say explicitly what [] means rather than
+            # letting a model fill required schema fields with invented candidate rows.
+            empty_scan_note = (
+                "The deterministic scanner presented ZERO candidates for this target. Scanner Data is "
+                "an empty candidate list, not permission to invent evidence: return `findings: []`; "
+                "do not fabricate a path, line number, snippet, or candidate_id. Report other "
+                "schema fields only when grounded in supplied evidence.\n\n"
+                if isinstance(batch, list) and not batch else ""
+            )
+            batch_prompt = header + empty_scan_note + (
                 f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
                 f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
                 f"triage each item, and output your structured JSON findings.\n\n"
@@ -3166,6 +3175,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     if model_parse_succeeded:
         if candidates_snapshot is not None:
             _verify_candidates_integrity(candidates_file, candidates_snapshot)
+            # Coverage at line level cannot undo a store write: reject fabricated rows
+            # before the findings child can persist or publish them, including direct runs.
+            if read_candidate_count(run_dir) == 0 and (
+                report.get("findings") or report.get("verifications")
+            ):
+                _write_run_artifact(run_dir / "rejected_report.json", json.dumps(report, indent=2))
+                raise NoVerdictError(
+                    f"{agent_name}: scanner presented 0 candidates but model reported rows; "
+                    "refusing findings dispatch")
         elif candidates_file.exists():
             # agents-5bn: no pre-pass produced candidates, yet one exists after the session — a
             # write-granted session wrote it. Refuse rather than bind findings against a
