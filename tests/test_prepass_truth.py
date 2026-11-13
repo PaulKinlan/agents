@@ -25,6 +25,128 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
+    """agents-40jyn: the anatomy audit checked FILE EXISTENCE only, so an agent.yaml that
+    parsed to a contract-violating shape (missing `triggers`/`blocking`, an invented `class`)
+    or a SKILL.md without its discovery frontmatter passed a clean audit. The contract the
+    fleet documents in AGENTS.md ("Required agent.yaml fields", SKILL.md frontmatter) is now
+    validated section by section."""
+
+    GOOD_YAML = (
+        "name: sample\n"
+        "class: observer\n"
+        "plane: [local, ci]\n"
+        "containment: t0-readonly\n"
+        "triggers: [manual, schedule]\n"
+        "blocking: false\n"
+        "summary: s\n"
+        "capabilities:\n"
+        "  write: false\n"
+    )
+    GOOD_SKILL = (
+        "---\n"
+        "name: sample\n"
+        "description: A portable triage agent.\n"
+        "---\n\n"
+        "# Sample\n\nBody.\n"
+    )
+
+    @classmethod
+    def _qa_module(cls):
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_anatomy_40jyn", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_anatomy_40jyn", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        return qa
+
+    def _audit(self, tmp, name="sample", yaml_text=GOOD_YAML, skill_text=GOOD_SKILL):
+        agent = Path(tmp) / name
+        agent.mkdir(parents=True, exist_ok=True)
+        (agent / "agent.yaml").write_text(yaml_text, encoding="utf-8")
+        (agent / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        (agent / "report.schema.json").write_text("{}", encoding="utf-8")
+        (agent / "scripts").mkdir(exist_ok=True)
+        (agent / "scripts" / "prepass.py").write_text("x = 1\n", encoding="utf-8")
+        qa = self._qa_module()
+        with mock.patch.object(qa, "AGENTS_DIR", Path(tmp)):
+            return qa.audit_agent_contracts()
+
+    def test_compliant_agent_produces_no_contract_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._audit(tmp), [])
+
+    def test_missing_required_yaml_fields_are_named_individually(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=self.GOOD_YAML.replace(
+                "triggers: [manual, schedule]\n", "").replace("blocking: false\n", ""))
+        self.assertEqual([i["rule_id"] for i in issues],
+                         ["qa-missing-agent-yaml-field", "qa-missing-agent-yaml-field"])
+        self.assertIn("'triggers'", issues[0]["title"])
+        self.assertIn("'blocking'", issues[1]["title"])
+
+    def test_invented_class_value_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=self.GOOD_YAML.replace(
+                "class: observer", "class: wizard"))
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-invalid-agent-yaml-value"])
+        self.assertIn("'class'", issues[0]["title"])
+        self.assertIn("observer", issues[0]["title"])
+
+    def test_empty_plane_list_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=self.GOOD_YAML.replace(
+                "plane: [local, ci]", "plane: []"))
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-invalid-agent-yaml-value"])
+        self.assertIn("'plane'", issues[0]["title"])
+
+    def test_non_boolean_blocking_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=self.GOOD_YAML.replace(
+                "blocking: false", "blocking: sometimes"))
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-invalid-agent-yaml-value"])
+        self.assertIn("'blocking'", issues[0]["title"])
+
+    def test_unparseable_manifest_is_reported_not_clean(self):
+        # yaml_mini fails closed on tabs; the audit must surface that rather than
+        # silently treating the manifest as satisfied.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=self.GOOD_YAML.replace(
+                "capabilities:\n", "capabilities:\n\twrite: false\n"))
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-agent-yaml-unparseable"])
+
+    def test_skill_without_frontmatter_sections_is_reported(self):
+        body_only = "# Sample\n\nNo discovery header.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, skill_text=body_only)
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-missing-skill-frontmatter"])
+        self.assertIn("name", issues[0]["title"])
+        self.assertIn("description", issues[0]["title"])
+
+    def test_skill_frontmatter_missing_description_is_reported(self):
+        partial = ("---\nname: sample\n---\n\n# Sample\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, skill_text=partial)
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-missing-skill-frontmatter"])
+        self.assertIn("description", issues[0]["title"])
+        self.assertNotIn("name, description", issues[0]["title"].split(": ")[-1])
+
+    def test_real_fleet_violates_only_the_known_declaration_gaps(self):
+        """Calibration pin (agents-40jyn): every agent alive today satisfies every new
+        section check EXCEPT `triggers`/`blocking` on log-check, test-gap and vuln-triage
+        (scheduler.py defaults them, so they run while the documented contract is unmet).
+        A new violation must either fix its agent or consciously extend this set."""
+        qa = self._qa_module()
+        issues = qa.audit_agent_contracts()
+        by_rule = {}
+        for i in issues:
+            by_rule.setdefault(i["rule_id"], []).append(i["agent"])
+        self.assertEqual(sorted(by_rule), ["qa-missing-agent-yaml-field"])
+        self.assertEqual(sorted(by_rule["qa-missing-agent-yaml-field"]),
+                         ["log-check", "log-check", "test-gap", "test-gap",
+                          "vuln-triage", "vuln-triage"])
+
+
 class TestPrepassFixes(unittest.TestCase):
     def test_openai_rule_does_not_match_mid_word(self):
         sys.path.insert(0, str(ROOT / "agents" / "secret-scan" / "scripts"))

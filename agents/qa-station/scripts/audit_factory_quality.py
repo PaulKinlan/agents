@@ -2,7 +2,7 @@
 """Deterministic Pre-Pass for Factory QA Station (agents/qa-station/scripts/audit_factory_quality.py)
 
 Audits the Software Factory's own fleet and findings store:
-1. Verifies every `agents/<name>/` directory has valid `agent.yaml`, `SKILL.md`, `scripts/`, and `report.schema.json`.
+1. Verifies every `agents/<name>/` directory has valid `agent.yaml`, `SKILL.md`, `scripts/`, and `report.schema.json`, and that the manifest actually satisfies the documented anatomy contract (required fields and their declared value sets, SKILL.md discovery frontmatter) rather than merely existing (agents-40jyn).
 2. Analyzes readable `findings/*.json` lifecycle stores to compute per-agent finding volume,
    `wontfix` false-positive rates and missing-remediation counts.
 3. Flags agents with at least three findings and `wontfix_rate > 0.30` for prompt/pre-pass tuning.
@@ -10,9 +10,10 @@ Audits the Software Factory's own fleet and findings store:
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import sys
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -21,8 +22,70 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.yaml_mini import load_yaml, YamlParseError  # noqa: E402
 AGENTS_DIR = FACTORY_ROOT / "agents"
 FINDINGS_DIR = FACTORY_ROOT / "findings"
+
+# The anatomy contract is more than file existence (agents-40jyn): AGENTS.md "Required
+# agent.yaml fields" names five fields with closed value sets, and every SKILL.md carries a
+# frontmatter block declaring `name` and `description` (how all three engines discover the
+# skill). A manifest that parses to the wrong shape, or a skill whose discovery header is
+# missing, passes the old existence check while violating the contract the fleet documents.
+REQUIRED_YAML_FIELDS: Dict[str, Optional[frozenset]] = {
+    "class": frozenset({"observer", "proposer", "optimizer"}),
+    "containment": frozenset({"t0-readonly", "t1-fetch", "t2-local", "t3-sandbox"}),
+    # `plane` and `triggers` may be a scalar or a list; every value must be in the set and
+    # the field must not be empty.
+    "plane": frozenset({"local", "ci", "both"}),
+    "triggers": frozenset({"schedule", "manual", "git-hook", "repo-event", "webhook", "agent"}),
+    # `blocking` is presence+boolean only (AGENTS.md: "true only if deterministic and
+    # sub-5s"), so its allowed set is empty here and `_invalid_field_reason` handles it
+    # before ever reading the set.
+    "blocking": frozenset(),
+}
+REQUIRED_SKILL_FRONTMATTER = ("name", "description")
+
+
+def _frontmatter_sections(skill_text: str) -> List[str]:
+    """Required frontmatter sections MISSING from a SKILL.md's leading `---` block.
+
+    A presence check, not a YAML parse: the question is whether the discovery header
+    declares each required section with a non-empty value, answered line-wise so the
+    pre-pass never writes a temp file. Lines after the closing `---` are body, not
+    frontmatter, and indented `name:`/`description:` keys are not top-level declarations.
+    """
+    lines = skill_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return list(REQUIRED_SKILL_FRONTMATTER)
+    closing = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            closing = i
+            break
+    if closing is None:
+        return list(REQUIRED_SKILL_FRONTMATTER)
+    present = set()
+    for line in lines[1:closing]:
+        m = re.match(r"^(name|description):\s*(\S.*)$", line)
+        if m:
+            present.add(m.group(1))
+    return [s for s in REQUIRED_SKILL_FRONTMATTER if s not in present]
+
+
+def _invalid_field_reason(field: str, value: Any) -> Optional[str]:
+    """Why `value` violates the declared contract for `field`, or None when it complies."""
+    allowed = REQUIRED_YAML_FIELDS[field]
+    if field == "blocking":
+        if not isinstance(value, bool):
+            return f"expected a boolean, got {value!r}"
+        return None
+    values = value if isinstance(value, list) else [value]
+    if not values:
+        return "must declare at least one value"
+    bad = [v for v in values if not (isinstance(v, str) and v in allowed)]
+    if bad:
+        return f"expected one of {sorted(allowed)}, got {bad!r}"
+    return None
 
 
 def audit_agent_contracts() -> List[Dict[str, Any]]:
@@ -49,6 +112,63 @@ def audit_agent_contracts() -> List[Dict[str, Any]]:
                 "severity": "high",
                 "title": f"Agent '{p.name}' Missing Deterministic Python Pre-Pass Script"
             })
+        manifest = p / "agent.yaml"
+        if manifest.exists():
+            try:
+                config = load_yaml(manifest)
+            except (YamlParseError, OSError) as exc:
+                contract_issues.append({
+                    "rule_id": "qa-agent-yaml-unparseable",
+                    "agent": p.name,
+                    "path": f"agents/{p.name}/agent.yaml",
+                    "severity": "high",
+                    "title": f"Agent '{p.name}' agent.yaml Does Not Parse: {exc}"
+                })
+            else:
+                if not isinstance(config, dict):
+                    contract_issues.append({
+                        "rule_id": "qa-agent-yaml-unparseable",
+                        "agent": p.name,
+                        "path": f"agents/{p.name}/agent.yaml",
+                        "severity": "high",
+                        "title": f"Agent '{p.name}' agent.yaml Is Not A Mapping: {type(config).__name__}"
+                    })
+                else:
+                    for field, allowed in REQUIRED_YAML_FIELDS.items():
+                        if field not in config:
+                            contract_issues.append({
+                                "rule_id": "qa-missing-agent-yaml-field",
+                                "agent": p.name,
+                                "path": f"agents/{p.name}/agent.yaml",
+                                "severity": "high",
+                                "title": f"Agent '{p.name}' agent.yaml Missing Required Field '{field}'"
+                            })
+                            continue
+                        reason = _invalid_field_reason(field, config[field])
+                        if reason:
+                            contract_issues.append({
+                                "rule_id": "qa-invalid-agent-yaml-value",
+                                "agent": p.name,
+                                "path": f"agents/{p.name}/agent.yaml",
+                                "severity": "high",
+                                "title": f"Agent '{p.name}' agent.yaml Field '{field}' Invalid: {reason}"
+                            })
+        skill = p / "SKILL.md"
+        if skill.exists():
+            try:
+                skill_text = skill.read_text(encoding="utf-8")
+            except OSError:
+                skill_text = ""
+            missing_sections = _frontmatter_sections(skill_text)
+            if missing_sections:
+                contract_issues.append({
+                    "rule_id": "qa-missing-skill-frontmatter",
+                    "agent": p.name,
+                    "path": f"agents/{p.name}/SKILL.md",
+                    "severity": "high",
+                    "title": (f"Agent '{p.name}' SKILL.md Frontmatter Missing Required "
+                              f"Section(s): {', '.join(missing_sections)}")
+                })
     return contract_issues
 
 
