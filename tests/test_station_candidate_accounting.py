@@ -413,6 +413,20 @@ class TestPresentedIdsComeFromTheRun(unittest.TestCase):
         self.assertEqual(read_presented_candidate_ids(self._run([{"candidate_id": "a"}, {"rule_id": "r"}])),
                          [], "partial ids are no ids: the whole presented population must be nameable")
 
+    def test_bare_list_count_and_ids_match_what_dispatcher_presents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "candidates.json"
+            path.write_text("[]", encoding="utf-8")
+            self.assertEqual(read_candidate_count(tmp), 0)
+            self.assertEqual(read_presented_candidate_ids(tmp), [])
+            path.write_text(json.dumps([{"candidate_id": "a"}, {"candidate_id": "b"}]),
+                            encoding="utf-8")
+            self.assertEqual(read_candidate_count(tmp), 2)
+            self.assertEqual(read_presented_candidate_ids(tmp), ["a", "b"])
+            path.unlink()
+            self.assertIsNone(read_candidate_count(tmp))
+            self.assertIsNone(read_presented_candidate_ids(tmp))
+
     def test_no_candidates_json_is_none(self):
         self.assertIsNone(read_presented_candidate_ids(tempfile.mkdtemp()))
         self.assertIsNone(read_presented_candidate_ids(None))
