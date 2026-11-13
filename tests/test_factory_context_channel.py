@@ -118,6 +118,20 @@ class TestStationContextChannel(unittest.TestCase):
         self.assertEqual(rejected["findings"][0]["path"], "src/imaginary.py")
         self.assertFalse((self.box.root / "findings" / "trusted.json").exists())
 
+    def test_empty_scan_aggregate_claims_are_rejected_before_store_dispatch(self):
+        manifest = self.box.root / "agents" / "probe" / "agent.yaml"
+        manifest.write_text(manifest.read_text(encoding="utf-8") +
+                            "candidate_accounting: aggregate-claimed\n", encoding="utf-8")
+        (self.box.root / "outputs" / "probe.txt").write_text(
+            report(finding(rule_id="made-up", path="src/imaginary.py",
+                           covered_candidate_ids=["cand-invented"],
+                           anchor_candidate_id="cand-invented")), encoding="utf-8")
+        with self.assertRaisesRegex(factory_cli.NoVerdictError, "presented 0 candidates.*refusing findings dispatch"):
+            self.run_payload({"candidates": []})
+        run_dir, = (self.box.root / "runs").glob("probe-*")
+        self.assertTrue((run_dir / "rejected_report.json").exists())
+        self.assertFalse((self.box.root / "findings" / "trusted.json").exists())
+
     def test_context_is_separate_unsliced_and_not_an_identity_candidate(self):
         context = {"clusters": [{"cluster": i} for i in range(55)], "threat_model_summary": "model evidence",
                    "rule_id": "injected", "path": "src/context.py"}
