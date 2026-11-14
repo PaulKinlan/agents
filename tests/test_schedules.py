@@ -21,6 +21,7 @@ from lib.scheduler import (
     generate_systemd_units,
     get_label,
     get_scheduled_candidates,
+    load_yaml_simple,
     install_schedule,
     normalize_platform,
     uninstall_schedule,
@@ -66,6 +67,19 @@ class TestScheduleGeneration(unittest.TestCase):
     def test_get_label(self):
         label = get_label("voicebox", "secret-scan")
         self.assertEqual(label, "com.softwarefactory.voicebox.secret-scan")
+
+    def test_missing_manifest_fields_do_not_silently_exclude_stations(self):
+        for name in ("log-check", "test-gap", "vuln-triage"):
+            with self.subTest(agent=name):
+                manifest = load_yaml_simple(FACTORY_ROOT / "agents" / name / "agent.yaml")
+                self.assertIn("schedule", manifest["triggers"])
+                self.assertIn("manual", manifest["triggers"])
+                self.assertIs(manifest["blocking"], False)
+
+        # fauxmium lists both stations but has no per-agent schedule override;
+        # missing triggers previously caused the scheduler to omit them.
+        scheduled = {item["agent"] for item in get_scheduled_candidates(target_filter="fauxmium")}
+        self.assertTrue({"test-gap", "vuln-triage"} <= scheduled)
 
     def test_generate_plist_calendar(self):
         with tempfile.TemporaryDirectory() as tmpdir:

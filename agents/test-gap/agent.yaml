@@ -2,6 +2,8 @@ name: test-gap
 class: proposer
 plane: [local, ci]
 containment: t0-readonly
+triggers: [schedule, manual]
+blocking: false
 summary: Identify untested modules and functions, measure test deficit, and propose test suites.
 capabilities:
   write: false
