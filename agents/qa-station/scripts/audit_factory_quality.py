@@ -2,7 +2,7 @@
 """Deterministic Pre-Pass for Factory QA Station (agents/qa-station/scripts/audit_factory_quality.py)
 
 Audits the Software Factory's own fleet and findings store:
-1. Verifies every `agents/<name>/` directory has valid `agent.yaml`, `SKILL.md`, `scripts/`, and `report.schema.json`, and that the manifest actually satisfies the documented anatomy contract (required fields and their declared value sets, SKILL.md discovery frontmatter) rather than merely existing (agents-40jyn).
+1. Verifies every `agents/<name>/` directory has valid `agent.yaml`, `SKILL.md`, `scripts/`, and `report.schema.json`, and that the manifest actually satisfies the documented anatomy contract (required fields and their declared value sets, SKILL.md discovery frontmatter) rather than merely existing (agents-40jyn). The report schema audited is the one the manifest declares under `output.schema` — the path the runtime loader (`lib/report_schema.declared_schema`) actually validates against — and an undeclared `output.schema` is itself a violation, because the runtime then validates nothing (agents-43mqf).
 2. Analyzes readable `findings/*.json` lifecycle stores to compute per-agent finding volume,
    `wontfix` false-positive rates and missing-remediation counts.
 3. Flags agents with at least three findings and `wontfix_rate > 0.25` (the SKILL.md triage
@@ -130,6 +130,11 @@ def audit_agent_contracts() -> List[Dict[str, Any]]:
                 "title": f"Agent '{p.name}' Missing Deterministic Python Pre-Pass Script"
             })
         manifest = p / "agent.yaml"
+        # agents-43mqf: the schema the runtime validates against is the one agent.yaml
+        # names under output.schema, not a literal report.schema.json. Captured here while
+        # the manifest is parsed so the schema check below can resolve the declared path
+        # the way lib/report_schema.declared_schema does.
+        declared_schema_name: Optional[str] = None
         if manifest.exists():
             try:
                 config = load_yaml(manifest)
@@ -151,6 +156,24 @@ def audit_agent_contracts() -> List[Dict[str, Any]]:
                         "title": f"Agent '{p.name}' agent.yaml Is Not A Mapping: {type(config).__name__}"
                     })
                 else:
+                    # agents-43mqf: declared_schema returns None when output.schema is
+                    # undeclared (or not a string), and validate_agent_report then checks
+                    # nothing - silently. A manifest that skips the declaration is an
+                    # anatomy violation, not a convention gap.
+                    output_block = config.get("output")
+                    declared = (output_block.get("schema")
+                                if isinstance(output_block, dict) else None)
+                    if isinstance(declared, str) and declared.strip():
+                        declared_schema_name = declared.strip()
+                    else:
+                        contract_issues.append({
+                            "rule_id": "qa-undeclared-output-schema",
+                            "agent": p.name,
+                            "path": f"agents/{p.name}/agent.yaml",
+                            "severity": "high",
+                            "title": (f"Agent '{p.name}' agent.yaml Does Not Declare output.schema: "
+                                      "The Runtime Validates Nothing")
+                        })
                     for field, allowed in REQUIRED_YAML_FIELDS.items():
                         if field not in config:
                             contract_issues.append({
@@ -186,30 +209,46 @@ def audit_agent_contracts() -> List[Dict[str, Any]]:
                     "title": (f"Agent '{p.name}' SKILL.md Frontmatter Missing Required "
                               f"Section(s): {', '.join(missing_sections)}")
                 })
-        schema_path = p / "report.schema.json"
+        # agents-43mqf: mirror declared_schema's contract on the DECLARED path - the loader
+        # raises FileNotFoundError for a declared file that is absent and ValueError for one
+        # that is unparsable or not a JSON object, and the audit used to parse the literal
+        # report.schema.json regardless, so a corrupt *declared* schema passed clean
+        # (agents-ipvx9 fixed the parse check but kept the hard-coded path). When nothing is
+        # declared (flagged above; agent.yaml missing or unparsable fires its own rules), the
+        # conventional report.schema.json is still parse-checked so a legacy broken file is
+        # not waved through either. A missing conventional file stays with the
+        # required-files rule above - one finding per defect.
+        schema_name = declared_schema_name or "report.schema.json"
+        schema_path = p / schema_name
+        if declared_schema_name is not None and schema_name != "report.schema.json" \
+                and not schema_path.exists():
+            contract_issues.append({
+                "rule_id": "qa-declared-schema-missing",
+                "agent": p.name,
+                "path": f"agents/{p.name}/{schema_name}",
+                "severity": "high",
+                "title": (f"Agent '{p.name}' Declares output.schema {schema_name!r} But "
+                          f"agents/{p.name}/{schema_name} Does Not Exist")
+            })
         if schema_path.exists():
-            # agents-ipvx9: the anatomy audit proved the file EXISTS but never that it parses,
-            # so a corrupt report.schema.json passed a clean audit while the runtime loader
-            # (lib/report_schema.declared_schema) fails closed on the same file. Mirror that
-            # loader's contract exactly: valid JSON and a JSON object.
             try:
                 schema = json.loads(schema_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
                 contract_issues.append({
                     "rule_id": "qa-report-schema-unparseable",
                     "agent": p.name,
-                    "path": f"agents/{p.name}/report.schema.json",
+                    "path": f"agents/{p.name}/{schema_name}",
                     "severity": "high",
-                    "title": f"Agent '{p.name}' report.schema.json Does Not Parse: {exc}"
+                    "title": f"Agent '{p.name}' Declared Schema {schema_name} Does Not Parse: {exc}"
                 })
             else:
                 if not isinstance(schema, dict):
                     contract_issues.append({
                         "rule_id": "qa-report-schema-unparseable",
                         "agent": p.name,
-                        "path": f"agents/{p.name}/report.schema.json",
+                        "path": f"agents/{p.name}/{schema_name}",
                         "severity": "high",
-                        "title": (f"Agent '{p.name}' report.schema.json Is Not A JSON Object: "
+                        "title": (f"Agent '{p.name}' Declared Schema {schema_name} Is Not A JSON Object: "
                                   f"{type(schema).__name__}")
                     })
     return contract_issues

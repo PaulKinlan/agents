@@ -40,6 +40,8 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
         "triggers: [manual, schedule]\n"
         "blocking: false\n"
         "summary: s\n"
+        "output:\n"
+        "  schema: report.schema.json\n"
         "capabilities:\n"
         "  write: false\n"
     )
@@ -61,12 +63,16 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
         return qa
 
     def _audit(self, tmp, name="sample", yaml_text=GOOD_YAML, skill_text=GOOD_SKILL,
-               schema_text="{}"):
+               schema_text="{}", extra_files=None):
         agent = Path(tmp) / name
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "agent.yaml").write_text(yaml_text, encoding="utf-8")
         (agent / "SKILL.md").write_text(skill_text, encoding="utf-8")
         (agent / "report.schema.json").write_text(schema_text, encoding="utf-8")
+        for rel, text in (extra_files or {}).items():
+            target = agent / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
         (agent / "scripts").mkdir(exist_ok=True)
         (agent / "scripts" / "prepass.py").write_text("x = 1\n", encoding="utf-8")
         qa = self._qa_module()
@@ -149,6 +155,60 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
             issues = self._audit(tmp, schema_text="[1, 2]")
         self.assertEqual([i["rule_id"] for i in issues], ["qa-report-schema-unparseable"])
         self.assertIn("Not A JSON Object", issues[0]["title"])
+
+    def test_corrupt_declared_schema_is_reported_not_clean(self):
+        # agents-43mqf, the review finding's constructed case: the manifest declares
+        # output.schema out.schema.json and THAT file is corrupt, while the literal
+        # report.schema.json is fine. The old audit parsed only report.schema.json and
+        # stayed clean; the runtime fails closed on the declared file.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(
+                tmp,
+                yaml_text=self.GOOD_YAML.replace(
+                    "  schema: report.schema.json\n", "  schema: out.schema.json\n"),
+                extra_files={"out.schema.json": "{ not json"},
+            )
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-report-schema-unparseable"])
+        self.assertIn("out.schema.json", issues[0]["path"])
+        self.assertIn("Does Not Parse", issues[0]["title"])
+
+    def test_undeclared_output_schema_is_reported(self):
+        # agents-43mqf: declared_schema returns None for an agent.yaml with no output
+        # block, and validate_agent_report then checks nothing - silently. The audit
+        # must name that hole, and still parse-check the conventional file (a legacy
+        # corrupt report.schema.json must not be waved through either).
+        without_output = self.GOOD_YAML.replace("output:\n", "").replace(
+            "  schema: report.schema.json\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=without_output)
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-undeclared-output-schema"])
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=without_output, schema_text="{ not json")
+        self.assertEqual([i["rule_id"] for i in issues],
+                         ["qa-undeclared-output-schema", "qa-report-schema-unparseable"])
+
+    def test_non_string_output_schema_is_reported_as_undeclared(self):
+        # A list or mapping under output.schema is not a filename; the loader treats it
+        # exactly like an undeclared schema, so the audit says so rather than guessing.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, yaml_text=self.GOOD_YAML.replace(
+                "  schema: report.schema.json\n", "  schema: [report.schema.json]\n"))
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-undeclared-output-schema"])
+
+    def test_missing_declared_schema_is_reported(self):
+        # agents-43mqf: declared_schema raises FileNotFoundError for a declared file that
+        # does not exist; the audit mirrors that instead of parsing whatever else is there.
+        # The conventional report.schema.json also being absent fires the required-file rule
+        # exactly once - one finding per defect.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(
+                tmp,
+                yaml_text=self.GOOD_YAML.replace(
+                    "  schema: report.schema.json\n", "  schema: out.schema.json\n"),
+            )
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-declared-schema-missing"])
+        self.assertIn("out.schema.json", issues[0]["path"])
+        self.assertIn("Does Not Exist", issues[0]["title"])
 
     def test_real_fleet_satisfies_agent_contracts(self):
         """Every shipped agent satisfies the QA manifest and skill contract.
