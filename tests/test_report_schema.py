@@ -15,6 +15,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import stat
@@ -256,6 +257,21 @@ class TestDeclaredSchema(unittest.TestCase):
                               f"{schema_path}: findings items must require 'rule_id'")
                 self.assertIn("severity", item_required,
                               f"{schema_path}: findings items must require 'severity'")
+
+
+class TestLogCheckReportExample(unittest.TestCase):
+    def test_documented_report_satisfies_declared_schema(self):
+        """The log-check example must be usable as a report, not an enum template."""
+        agent_dir = FACTORY_ROOT / "agents" / "log-check"
+        cfg = {"output": {"schema": "report.schema.json"}}
+        text = (agent_dir / "SKILL.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\s*\n(.*?)```", text, re.S)
+        self.assertEqual(len(blocks), 1, "check the single documented report example")
+        report = json.loads(blocks[0])
+        self.assertEqual(validate_agent_report(agent_dir, cfg, report), [])
+        report["findings"][0]["severity"] = "high | medium | low"
+        self.assertTrue(any("severity" in error for error in
+                            validate_agent_report(agent_dir, cfg, report)))
 
 
 class TestDocsDriftCandidateIdentityContract(unittest.TestCase):
