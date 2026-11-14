@@ -131,20 +131,11 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
         self.assertIn("description", issues[0]["title"])
         self.assertNotIn("name, description", issues[0]["title"].split(": ")[-1])
 
-    def test_real_fleet_violates_only_the_known_declaration_gaps(self):
-        """Calibration pin (agents-40jyn): every agent alive today satisfies every new
-        section check EXCEPT `triggers`/`blocking` on log-check, test-gap and vuln-triage
-        (scheduler.py defaults them, so they run while the documented contract is unmet).
-        A new violation must either fix its agent or consciously extend this set."""
+    def test_real_fleet_satisfies_agent_contracts(self):
+        """Every shipped agent satisfies the QA manifest and skill contract.
+        A new violation must be fixed at its agent rather than accepted here."""
         qa = self._qa_module()
-        issues = qa.audit_agent_contracts()
-        by_rule = {}
-        for i in issues:
-            by_rule.setdefault(i["rule_id"], []).append(i["agent"])
-        self.assertEqual(sorted(by_rule), ["qa-missing-agent-yaml-field"])
-        self.assertEqual(sorted(by_rule["qa-missing-agent-yaml-field"]),
-                         ["log-check", "log-check", "test-gap", "test-gap",
-                          "vuln-triage", "vuln-triage"])
+        self.assertEqual(qa.audit_agent_contracts(), [])
 
 
 class TestPrepassFixes(unittest.TestCase):
