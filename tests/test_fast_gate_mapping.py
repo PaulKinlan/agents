@@ -215,6 +215,7 @@ _PROBE_INVENTORY: tuple[str, ...] = (
     "agents/modern-web/scripts/guides_index.json",
     "agents/perf-review/scripts/scan_perf_changes.py",
     "agents/pr-fixer/scripts/collect_failures.py",
+    "agents/test-gap/SKILL.md",
     "agents/vuln-verify/SKILL.md",
     "agents/vuln-verify/agent.yaml",
     "docs/INTEGRATION.md",
@@ -1203,6 +1204,18 @@ class TestFastGateMapping(unittest.TestCase):
         """agents/*/SKILL.md is walked by the docs-drift scanner and pinned by count (agents-9nir P0)."""
         mapped = resolve_fast_gate(["agents/docs-drift/SKILL.md"])
         self.assertIn("tests/test_docs_drift.py", mapped, "SKILL.md walker suite omitted (agents-9nir)")
+
+    def test_test_gap_skill_md_maps_to_docs_drift_and_redaction_contract(self):
+        """agents-xe24o: the per-station test-gap arm carries BOTH consumers. RuleLabelShapeTest reads
+        agents/test-gap/SKILL.md from the real tree (tests/test_redaction.py:952-966) and pins its
+        documented rule_id, which the generic agents/*/SKILL.md arm at 180 never selected; and because
+        this arm matches FIRST, it must also carry the docs-drift walker consumer the 180 arm would
+        otherwise have provided. Asserted together so neither consumer can be dropped silently."""
+        mapped = resolve_fast_gate(["agents/test-gap/SKILL.md"])
+        self.assertIn("tests/test_docs_drift.py", mapped,
+                      "walker consumer dropped by the per-station arm (agents-xe24o)")
+        self.assertIn("tests/test_redaction.py", mapped,
+                      "real-tree redaction contract omitted (agents-xe24o)")
 
     def test_agent_yaml_maps_to_docs_design_and_containment(self):
         """agents/*/agent.yaml is globbed off the real tree by two suites (agents-9nir review)."""
