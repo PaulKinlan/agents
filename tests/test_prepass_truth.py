@@ -60,12 +60,13 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
         loader.exec_module(qa)
         return qa
 
-    def _audit(self, tmp, name="sample", yaml_text=GOOD_YAML, skill_text=GOOD_SKILL):
+    def _audit(self, tmp, name="sample", yaml_text=GOOD_YAML, skill_text=GOOD_SKILL,
+               schema_text="{}"):
         agent = Path(tmp) / name
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "agent.yaml").write_text(yaml_text, encoding="utf-8")
         (agent / "SKILL.md").write_text(skill_text, encoding="utf-8")
-        (agent / "report.schema.json").write_text("{}", encoding="utf-8")
+        (agent / "report.schema.json").write_text(schema_text, encoding="utf-8")
         (agent / "scripts").mkdir(exist_ok=True)
         (agent / "scripts" / "prepass.py").write_text("x = 1\n", encoding="utf-8")
         qa = self._qa_module()
@@ -131,11 +132,104 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
         self.assertIn("description", issues[0]["title"])
         self.assertNotIn("name, description", issues[0]["title"].split(": ")[-1])
 
+    def test_unparseable_report_schema_is_reported_not_clean(self):
+        # agents-ipvx9: the anatomy audit checked file EXISTENCE only, so a corrupt
+        # report.schema.json passed a clean audit while the runtime loader
+        # (lib/report_schema.declared_schema) fails closed on the same file.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, schema_text="{ not json")
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-report-schema-unparseable"])
+        self.assertIn("Does Not Parse", issues[0]["title"])
+        self.assertIn("report.schema.json", issues[0]["path"])
+
+    def test_non_object_report_schema_is_reported_not_clean(self):
+        # Same rule as the runtime contract: a schema that parses but is not a JSON
+        # object is exactly what declared_schema raises ValueError for.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(tmp, schema_text="[1, 2]")
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-report-schema-unparseable"])
+        self.assertIn("Not A JSON Object", issues[0]["title"])
+
     def test_real_fleet_satisfies_agent_contracts(self):
         """Every shipped agent satisfies the QA manifest and skill contract.
         A new violation must be fixed at its agent rather than accepted here."""
         qa = self._qa_module()
         self.assertEqual(qa.audit_agent_contracts(), [])
+
+
+class TestQaStationSchemaAndThresholdContract(unittest.TestCase):
+    """agents-ipvx9: the scorecard audit also drifted from the documented contract -
+    the noise rule fired at `> 0.30` in code while agents/qa-station/SKILL.md has
+    always required a tuning recommendation at `wontfix_rate > 0.25`. These tests pin
+    the code constant to the SKILL.md line and the strict-> boundary behaviour.
+    """
+
+    @classmethod
+    def _qa_module(cls):
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_ipvx9", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_ipvx9", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        return qa
+
+    def _scorecard(self, qa, tmp, wontfix_count, total):
+        findings_dir = Path(tmp)
+        records = {}
+        for i in range(total):
+            records[f"f{i}"] = {
+                "agent": "lint",
+                "state": "wontfix" if i < wontfix_count else "new",
+                "remediation": "r",
+            }
+        (findings_dir / "store.json").write_text(
+            json.dumps({"target": "t", "findings": records}), encoding="utf-8")
+        with mock.patch.object(qa, "FINDINGS_DIR", findings_dir):
+            return qa.audit_findings_precision()
+
+    def _wontfix_candidates(self, data):
+        return [c for c in data["noisy_candidates"]
+                if c["rule_id"] == "qa-agent-high-wontfix-noise"]
+
+    def test_threshold_drift_guard(self):
+        """The SKILL.md contract states the wontfix noise line exactly once and the
+        code constant equals it. Either side edited alone fails here, which is the
+        drift agents-ipvx9 measured (0.30 in code vs 0.25 in SKILL.md).
+        """
+        qa = self._qa_module()
+        skill = (ROOT / "agents" / "qa-station" / "SKILL.md").read_text(encoding="utf-8")
+        documented = re.findall(r"wontfix_rate > (0?\.\d+)", skill)
+        self.assertEqual(len(documented), 1,
+                         "SKILL.md must state the wontfix noise threshold exactly once")
+        self.assertEqual(float(documented[0]), qa.WONTFIX_NOISE_RATE,
+                         "code WONTFIX_NOISE_RATE and the SKILL.md contract drifted")
+
+    def test_rate_between_old_and_new_threshold_now_fires(self):
+        # 3/11 = 0.273: below the old 0.30 line, above SKILL.md's 0.25. This is the
+        # discriminating case - the agent the documented contract acted on but the
+        # scanner never surfaced.
+        qa = self._qa_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self._scorecard(qa, tmp, wontfix_count=3, total=11)
+        candidates = self._wontfix_candidates(data)
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("25% Wontfix Threshold", candidates[0]["title"])
+
+    def test_rate_exactly_at_threshold_does_not_fire(self):
+        # Strictly greater-than: 3/12 = 0.250 sits ON the SKILL.md line, not over it.
+        qa = self._qa_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self._scorecard(qa, tmp, wontfix_count=3, total=12)
+        self.assertEqual(self._wontfix_candidates(data), [])
+
+    def test_real_fleet_report_schemas_parse_as_objects(self):
+        """Calibration (agents-40jyn shape): the new schema check adds no violations
+        on the fleet as it stands; a new violation must fix its agent or extend this
+        pin consciously."""
+        qa = self._qa_module()
+        issues = [i for i in qa.audit_agent_contracts()
+                  if i["rule_id"] == "qa-report-schema-unparseable"]
+        self.assertEqual(issues, [])
 
 
 class TestPrepassFixes(unittest.TestCase):

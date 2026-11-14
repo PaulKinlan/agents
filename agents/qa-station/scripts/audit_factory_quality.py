@@ -5,7 +5,8 @@ Audits the Software Factory's own fleet and findings store:
 1. Verifies every `agents/<name>/` directory has valid `agent.yaml`, `SKILL.md`, `scripts/`, and `report.schema.json`, and that the manifest actually satisfies the documented anatomy contract (required fields and their declared value sets, SKILL.md discovery frontmatter) rather than merely existing (agents-40jyn).
 2. Analyzes readable `findings/*.json` lifecycle stores to compute per-agent finding volume,
    `wontfix` false-positive rates and missing-remediation counts.
-3. Flags agents with at least three findings and `wontfix_rate > 0.30` for prompt/pre-pass tuning.
+3. Flags agents with at least three findings and `wontfix_rate > 0.25` (the SKILL.md triage
+   contract, agents-ipvx9) for prompt/pre-pass tuning.
 """
 
 import argparse
@@ -29,6 +30,13 @@ FINDINGS_DIR = FACTORY_ROOT / "findings"
 # agents-21lfh: states whose finding is still live work. wontfix is a human suppression, fixed is
 # closed; neither has a next step left to describe.
 LIVE_WORK_STATES = frozenset(("new", "accepted", "regressed"))
+
+# agents-ipvx9: this scanner flagged at `> 0.30` while agents/qa-station/SKILL.md has always
+# required a tuning recommendation at `wontfix_rate > 0.25` — the deterministic pre-pass must
+# surface every agent the documented contract acts on, so the code follows the SKILL.md line.
+# The named constant plus the drift-guard test (TestQaStationSchemaAndThresholdContract in
+# tests/test_prepass_truth.py) keep the two sources from drifting apart again.
+WONTFIX_NOISE_RATE = 0.25
 
 # The anatomy contract is more than file existence (agents-40jyn): AGENTS.md "Required
 # agent.yaml fields" names five fields with closed value sets, and every SKILL.md carries a
@@ -178,6 +186,32 @@ def audit_agent_contracts() -> List[Dict[str, Any]]:
                     "title": (f"Agent '{p.name}' SKILL.md Frontmatter Missing Required "
                               f"Section(s): {', '.join(missing_sections)}")
                 })
+        schema_path = p / "report.schema.json"
+        if schema_path.exists():
+            # agents-ipvx9: the anatomy audit proved the file EXISTS but never that it parses,
+            # so a corrupt report.schema.json passed a clean audit while the runtime loader
+            # (lib/report_schema.declared_schema) fails closed on the same file. Mirror that
+            # loader's contract exactly: valid JSON and a JSON object.
+            try:
+                schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+                contract_issues.append({
+                    "rule_id": "qa-report-schema-unparseable",
+                    "agent": p.name,
+                    "path": f"agents/{p.name}/report.schema.json",
+                    "severity": "high",
+                    "title": f"Agent '{p.name}' report.schema.json Does Not Parse: {exc}"
+                })
+            else:
+                if not isinstance(schema, dict):
+                    contract_issues.append({
+                        "rule_id": "qa-report-schema-unparseable",
+                        "agent": p.name,
+                        "path": f"agents/{p.name}/report.schema.json",
+                        "severity": "high",
+                        "title": (f"Agent '{p.name}' report.schema.json Is Not A JSON Object: "
+                                  f"{type(schema).__name__}")
+                    })
     return contract_issues
 
 
@@ -306,6 +340,8 @@ def audit_findings_precision() -> Dict[str, Any]:
         # count the SKILL.md tells the model to review, with no rate and no candidate rule, so an agent
         # whose findings systematically lack a remediation never surfaced the way a high wontfix rate
         # does. Same shape, same thresholds: a rate over the same 30% line, on the same >=3 floor.
+        # agents-ipvx9: the remediation-gap rule keeps that documented 30% line (report.schema.json
+        # describes it); the wontfix noise rule below is deliberately LOWER, at SKILL.md's 0.25.
         # agents-21lfh: measured over LIVE WORK ONLY (states new/accepted/regressed whose row is not a
         # dismissal - is_false_positive, the same predicate the store and publication filter use). A
         # dismissed finding has no next step by design ('evidence, not work', agents-f8dj) and a
@@ -323,13 +359,13 @@ def audit_findings_precision() -> Dict[str, Any]:
             "missing_remediation_rate": missing_remediation_rate,
             "estimated_precision": precision_est
         })
-        if wontfix_rate > 0.30 and st["total_findings"] >= 3:
+        if wontfix_rate > WONTFIX_NOISE_RATE and st["total_findings"] >= 3:
             noisy_candidates.append({
                 "rule_id": "qa-agent-high-wontfix-noise",
                 "agent": ag,
                 "path": f"agents/{ag}/SKILL.md",
                 "severity": "medium",
-                "title": f"Agent '{ag}' Exceeds 30% Wontfix Threshold ({wontfix_rate * 100:.1f}%)",
+                "title": f"Agent '{ag}' Exceeds 25% Wontfix Threshold ({wontfix_rate * 100:.1f}%)",
                 "rationale": "High wontfix ratio indicates false-positive creep; tighten deterministic pre-pass filters or SKILL.md triage rules."
             })
         if missing_remediation_rate > 0.30 and live_total >= 3:
