@@ -1204,6 +1204,12 @@ class TestFastGateMapping(unittest.TestCase):
         mapped = resolve_fast_gate(["agents/docs-drift/SKILL.md"])
         self.assertIn("tests/test_docs_drift.py", mapped, "SKILL.md walker suite omitted (agents-9nir)")
 
+    def test_log_check_skill_maps_all_real_tree_consumers(self):
+        """agents-qcggu: its JSON example feeds schema and redaction contracts as well as docs drift."""
+        mapped = resolve_fast_gate(["agents/log-check/SKILL.md"])
+        for suite in ("tests/test_docs_drift.py", "tests/test_report_schema.py", "tests/test_redaction.py"):
+            self.assertIn(suite, mapped)
+
     def test_agent_yaml_maps_to_docs_design_and_containment(self):
         """agents/*/agent.yaml is globbed off the real tree by two suites (agents-9nir review)."""
         mapped = resolve_fast_gate(["agents/vuln-verify/agent.yaml"])
