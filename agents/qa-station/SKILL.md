@@ -56,7 +56,7 @@ Respond ONLY with valid JSON matching `report.schema.json`:
       "snippet": "wontfix_rate: 0.35",
       "severity": "medium",
       "candidate_id": "cand-qa-123",
-      "title": "Agent Exceeds 30% Wontfix Threshold",
+      "title": "Agent Exceeds 25% Wontfix Threshold",
       "description": "Agent has high wontfix rate indicating noisy regex or prompt patterns.",
       "remediation": "Tune prompt exclusions to filter recurring false positives."
     }
