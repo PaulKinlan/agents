@@ -42,7 +42,7 @@ Emit clean, valid JSON adhering to this schema:
       "path": "server/index.js",
       "line_number": 45,
       "snippet": "const user = users.find(u => u.id === req.params.id);\nreturn user.profile;",
-      "severity": "high | medium | low",
+      "severity": "high",
       "title": "Unhandled TypeError in Route Handler",
       "description": "Log indicates repeated 'TypeError: Cannot read properties of undefined (reading profile)' when requesting unknown user IDs.",
       "remediation": "Add a guard clause: `if (!user) return res.status(404).json({ error: 'User not found' });`"

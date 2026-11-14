@@ -80,6 +80,25 @@ class TestDocsDriftReportExamples(unittest.TestCase):
             self.assertRegex(candidate["candidate_id"], r"^[0-9a-f]{16}$")
 
 
+class TestLogCheckReportExample(unittest.TestCase):
+    def test_documented_report_satisfies_declared_schema(self):
+        """The log-check example must be usable as a report, not an enum template."""
+        from lib.report_schema import validate_agent_report
+        from lib.yaml_mini import load_yaml
+
+        agent_dir = FACTORY_ROOT / "agents" / "log-check"
+        config = load_yaml(agent_dir / "agent.yaml")
+        text = (agent_dir / "SKILL.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\s*\n(.*?)```", text, re.S)
+        self.assertEqual(len(blocks), 1, "check the single documented report example")
+        report = json.loads(blocks[0])
+        self.assertEqual(config["output"]["schema"], "report.schema.json")
+        self.assertEqual(validate_agent_report(agent_dir, config, report), [])
+        report["findings"][0]["severity"] = "high | medium | low"
+        self.assertTrue(any("severity" in error for error in
+                            validate_agent_report(agent_dir, config, report)))
+
+
 class TestTreeDiagramParser(unittest.TestCase):
     def test_every_root_keeps_its_prefix(self):
         """A second, third and fourth root in the same code block must start new subtrees."""
