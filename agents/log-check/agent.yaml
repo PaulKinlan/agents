@@ -9,6 +9,8 @@ short_circuit_empty: true
 capabilities:
   write: false
   requires: []
+output:
+  schema: report.schema.json
 budget:
   max_minutes: 5
   max_usd: 0.50
