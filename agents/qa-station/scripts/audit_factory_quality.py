@@ -163,8 +163,10 @@ def audit_agent_contracts() -> List[Dict[str, Any]]:
                     output_block = config.get("output")
                     declared = (output_block.get("schema")
                                 if isinstance(output_block, dict) else None)
-                    if isinstance(declared, str) and declared.strip():
-                        declared_schema_name = declared.strip()
+                    if isinstance(declared, str) and declared:
+                        # Keep the filename verbatim: declared_schema joins the raw value,
+                        # so even surrounding whitespace names a different (missing) file.
+                        declared_schema_name = declared
                     else:
                         contract_issues.append({
                             "rule_id": "qa-undeclared-output-schema",

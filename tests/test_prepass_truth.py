@@ -210,6 +210,19 @@ class TestQaStationAnatomyValidatesRequiredSections(unittest.TestCase):
         self.assertIn("out.schema.json", issues[0]["path"])
         self.assertIn("Does Not Exist", issues[0]["title"])
 
+    def test_whitespace_padded_declared_schema_uses_verbatim_filename(self):
+        # The runtime treats spaces in output.schema as part of the filename; do not
+        # audit the conventional file after normalizing the declaration.
+        with tempfile.TemporaryDirectory() as tmp:
+            issues = self._audit(
+                tmp,
+                yaml_text=self.GOOD_YAML.replace(
+                    "  schema: report.schema.json\n",
+                    '  schema: " report.schema.json "\n'),
+            )
+        self.assertEqual([i["rule_id"] for i in issues], ["qa-declared-schema-missing"])
+        self.assertIn(" report.schema.json ", issues[0]["path"])
+
     def test_real_fleet_satisfies_agent_contracts(self):
         """Every shipped agent satisfies the QA manifest and skill contract.
         A new violation must be fixed at its agent rather than accepted here."""
