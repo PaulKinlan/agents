@@ -2,6 +2,8 @@ name: log-check
 class: observer
 plane: [local, ci]
 containment: t0-readonly
+triggers: [schedule, manual]
+blocking: false
 summary: Inspect runtime, test, and console logs, detect error signatures, correlate with source, and propose fixes.
 short_circuit_empty: true
 capabilities:
